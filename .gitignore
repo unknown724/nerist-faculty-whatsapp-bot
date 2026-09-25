@@ -3,4 +3,5 @@ node_modules/
 .wwebjs_cache/
 npm-debug.log*
 bot.log
+.env
 .DS_Store
