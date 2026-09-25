@@ -5,4 +5,5 @@ session_auth/
 npm-debug.log*
 bot.log
 .env
+qr.png
 .DS_Store

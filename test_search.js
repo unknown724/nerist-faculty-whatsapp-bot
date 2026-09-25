@@ -3,44 +3,64 @@ const path = require('path');
 
 const facultyList = JSON.parse(fs.readFileSync(path.join(__dirname, 'faculty.json'), 'utf8'));
 
-function getAcronym(str) {
+function cleanHonorifics(str) {
     if (!str) return '';
     return str
-        .replace(/\b(dr|mr|ms|prof|mrs|er)\b\.?/gi, '')
-        .replace(/[^a-zA-Z\s]/g, '')
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean)
-        .map(w => w[0])
-        .join('')
-        .toLowerCase();
+        .replace(/\b(dr|mr|ms|prof|mrs|er|sir|maam|mam|madam|miss)\b\.?/gi, ' ')
+        .replace(/[^a-zA-Z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
-function searchFaculty(query) {
-    const q = query.trim().toLowerCase();
+function getAllAcronyms(nameStr) {
+    const cleaned = cleanHonorifics(nameStr);
+    const words = cleaned.split(/\s+/).filter(Boolean);
+    if (words.length === 0) return [];
+
+    const initials = words.map(w => w[0].toLowerCase());
+    const full = initials.join('');
+    const list = new Set();
+    list.add(full);
+
+    if (words.length >= 3) {
+        list.add(initials[0] + initials[1]); // e.g. Joyatri Bora -> jb
+        list.add(initials[0] + initials[words.length - 1]); // e.g. Joyatri Hazarika -> jh
+    }
+    return Array.from(list);
+}
+
+function searchFaculty(rawQuery) {
+    const cleaned = cleanHonorifics(rawQuery).toLowerCase();
+    const q = cleaned || rawQuery.trim().toLowerCase();
     if (!q) return [];
 
-    // 1. Exact acronym / shortcut match (e.g. 'akr' -> Ashok Kumar Ray)
-    const exactAcronym = facultyList.filter(f => 
-        getAcronym(f.name) === q || getAcronym(f.portalName) === q
-    );
-    if (exactAcronym.length > 0) return exactAcronym;
+    // 1. Acronym match (when query is short: <= 4 letters, no spaces)
+    if (q.length <= 4 && !q.includes(' ')) {
+        const acronymMatches = facultyList.filter(f => {
+            const acrs = [
+                ...getAllAcronyms(f.name),
+                ...getAllAcronyms(f.portalName)
+            ];
+            return acrs.includes(q) || acrs.some(a => a.startsWith(q));
+        });
+        if (acronymMatches.length > 0) return acronymMatches;
+    }
 
-    // 2. Email username match (e.g. 'akr' in akr@nerist.ac.in, 'kry' in kry@nerist.ac.in)
+    // 2. Email username match
     const emailMatch = facultyList.filter(f => 
         (f.emails || []).some(em => em.toLowerCase().split('@')[0] === q)
     );
     if (emailMatch.length > 0) return emailMatch;
 
-    // 3. Name or portal name match (prefix or substring)
+    // 3. Name or portal name match
     const nameMatches = facultyList.filter(f => {
-        const name = (f.name || '').toLowerCase();
-        const pName = (f.portalName || '').toLowerCase();
-        return name.includes(q) || pName.includes(q);
+        const n = cleanHonorifics(f.name || '').toLowerCase();
+        const pn = cleanHonorifics(f.portalName || '').toLowerCase();
+        return n.includes(q) || pn.includes(q) || (f.name || '').toLowerCase().includes(q) || (f.portalName || '').toLowerCase().includes(q);
     });
     if (nameMatches.length > 0) return nameMatches;
 
-    // 4. Department match (e.g. 'physics')
+    // 4. Department match
     return facultyList.filter(f => {
         const dept = (f.department || '').toLowerCase();
         return dept.includes(q);
@@ -52,13 +72,6 @@ function handleMessage(messageBody) {
     if (!body) return null;
 
     const lowerBody = body.toLowerCase();
-
-    if (lowerBody === '@help' || lowerBody === '!help') {
-        return {
-            type: 'help',
-            text: 'Help message returned'
-        };
-    }
 
     let prefix = '';
     if (lowerBody.startsWith('@find')) {
@@ -74,46 +87,39 @@ function handleMessage(messageBody) {
         return { type: 'error', text: 'Please specify a faculty name.' };
     }
 
-    const encodedQuery = encodeURIComponent(query);
-    const searchUrl = `https://nerist-faculty-search.pages.dev/?q=${encodedQuery}`;
-
     const matches = searchFaculty(query);
 
     if (matches.length > 0) {
-        const topMatches = matches.slice(0, 3);
-        let replyText = `Found "${query}" - official contact here:\n${searchUrl}\n\n`;
+        const topMatch = matches[0];
+        const displayName = topMatch.name || topMatch.portalName;
+        const mobile = topMatch.portalPhone || topMatch.officialPhone || 'Not listed';
+        const dept = topMatch.department || 'NERIST';
 
-        topMatches.forEach((f, index) => {
-            const displayName = f.name || f.portalName;
-            const mobile = f.portalPhone || f.officialPhone || 'Not listed (check web portal)';
+        let replyBody = `👤 *${displayName}*\n📱 *Mobile:* ${mobile}\n🏛️ *Dept:* ${dept}`;
 
-            replyText += `👤 *${displayName}*\n📱 *Mobile:* ${mobile}\n`;
-
-            if (index < topMatches.length - 1) {
-                replyText += `──────────────────\n`;
-            }
-        });
-
-        if (matches.length > 3) {
-            replyText += `\n_...and ${matches.length - 3} more results on the website._`;
+        if (matches.length > 1) {
+            replyBody += `\n\n_Also found:_ ` + matches.slice(1, 4).map(m => {
+                const name = m.name || m.portalName;
+                return `${name} (\`@find ${name}\`)`;
+            }).join(', ');
         }
 
-        return { type: 'found', text: replyText, count: matches.length };
+        return { type: 'found', text: replyBody };
     } else {
-        const replyText = `Found "${query}" - official contact here:\n${searchUrl}\n\n📱 *Mobile:* No match found in offline database. Please check the website!`;
-        return { type: 'not_found', text: replyText };
+        return { type: 'not_found', text: 'No database found' };
     }
 }
 
 // Tests
-console.log('--- TEST 1: Shortcut @find akr ---');
-console.log(handleMessage('@find akr').text);
+console.log('--- TEST 1: Shortcut @find jb ---');
+console.log(handleMessage('@find jb').text);
 
-console.log('--- TEST 2: Shortcut @find kry ---');
-console.log(handleMessage('@find kry').text);
+console.log('\n--- TEST 2: Honorific @find jb maam ---');
+console.log(handleMessage('@find jb maam').text);
 
-console.log('--- TEST 3: Full Name @find Rajesh Kumar ---');
-console.log(handleMessage('@find Rajesh Kumar').text);
+console.log('\n--- TEST 3: Shortcut @find akr sir ---');
+console.log(handleMessage('@find akr sir').text);
 
-console.log('--- TEST 4: Unknown @find unknown person ---');
+console.log('\n--- TEST 4: Unknown @find unknown person ---');
 console.log(handleMessage('@find unknown person').text);
+
