@@ -1,0 +1,22 @@
+{
+  "name": "nerist-faculty-whatsapp-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp Group Bot for searching NERIST Faculty contacts and phone numbers",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "test": "node test_search.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "whatsapp-bot",
+    "nerist",
+    "faculty-search"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.7"
+  }
+}
