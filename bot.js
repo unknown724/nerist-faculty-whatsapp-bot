@@ -149,41 +149,48 @@ function searchFaculty(rawQuery) {
 /**
  * Hardware Power & Battery Sensing (Windows WMI + Linux sysfs)
  */
-function getPowerStatus() {
-    try {
-        if (process.platform === 'win32') {
-            const cmd = 'powershell -NoProfile -Command "(Get-CimInstance Win32_Battery).EstimatedChargeRemaining; (Get-CimInstance -Namespace root/wmi -ClassName BatteryStatus).PowerOnline"';
-            const lines = execSync(cmd, { encoding: 'utf8', timeout: 5000 }).trim().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-            const batteryPct = parseInt(lines[0], 10) || 100;
-            const isAcOnline = lines[1] ? lines[1].toLowerCase() === 'true' : true;
-            return { batteryPct, isAcOnline, success: true };
-        } else {
-            // Linux /sys/class/power_supply
-            let batteryPct = 100;
-            let isAcOnline = true;
-            try {
-                if (fs.existsSync('/sys/class/power_supply/BAT0/capacity')) {
-                    batteryPct = parseInt(fs.readFileSync('/sys/class/power_supply/BAT0/capacity', 'utf8').trim(), 10) || 100;
-                } else if (fs.existsSync('/sys/class/power_supply/BAT1/capacity')) {
-                    batteryPct = parseInt(fs.readFileSync('/sys/class/power_supply/BAT1/capacity', 'utf8').trim(), 10) || 100;
-                }
-                const acFiles = [
-                    '/sys/class/power_supply/AC/online',
-                    '/sys/class/power_supply/ACAD/online',
-                    '/sys/class/power_supply/ADP1/online'
-                ];
-                for (const acFile of acFiles) {
-                    if (fs.existsSync(acFile)) {
-                        isAcOnline = fs.readFileSync(acFile, 'utf8').trim() === '1';
-                        break;
+async function getPowerStatus() {
+    return new Promise((resolve) => {
+        try {
+            if (process.platform === 'win32') {
+                const cmd = 'powershell -NoProfile -Command "(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue).EstimatedChargeRemaining; (Get-CimInstance -Namespace root/wmi -ClassName BatteryStatus -ErrorAction SilentlyContinue).PowerOnline"';
+                exec(cmd, { encoding: 'utf8', timeout: 6000 }, (error, stdout) => {
+                    if (error || !stdout) {
+                        return resolve({ batteryPct: 100, isAcOnline: true, success: true });
                     }
-                }
-            } catch (e) {}
-            return { batteryPct, isAcOnline, success: true };
+                    const lines = stdout.trim().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                    const batteryPct = parseInt(lines[0], 10) || 100;
+                    const isAcOnline = lines[1] ? lines[1].toLowerCase() === 'true' : true;
+                    resolve({ batteryPct, isAcOnline, success: true });
+                });
+            } else {
+                // Linux /sys/class/power_supply
+                let batteryPct = 100;
+                let isAcOnline = true;
+                try {
+                    if (fs.existsSync('/sys/class/power_supply/BAT0/capacity')) {
+                        batteryPct = parseInt(fs.readFileSync('/sys/class/power_supply/BAT0/capacity', 'utf8').trim(), 10) || 100;
+                    } else if (fs.existsSync('/sys/class/power_supply/BAT1/capacity')) {
+                        batteryPct = parseInt(fs.readFileSync('/sys/class/power_supply/BAT1/capacity', 'utf8').trim(), 10) || 100;
+                    }
+                    const acFiles = [
+                        '/sys/class/power_supply/AC/online',
+                        '/sys/class/power_supply/ACAD/online',
+                        '/sys/class/power_supply/ADP1/online'
+                    ];
+                    for (const acFile of acFiles) {
+                        if (fs.existsSync(acFile)) {
+                            isAcOnline = fs.readFileSync(acFile, 'utf8').trim() === '1';
+                            break;
+                        }
+                    }
+                } catch (e) {}
+                resolve({ batteryPct, isAcOnline, success: true });
+            }
+        } catch (e) {
+            resolve({ batteryPct: 100, isAcOnline: true, success: false, error: e.message });
         }
-    } catch (e) {
-        return { batteryPct: 100, isAcOnline: true, success: false, error: e.message };
-    }
+    });
 }
 
 /**
@@ -392,10 +399,6 @@ async function startBot() {
                         light: '#ffffff'
                     }
                 });
-                const artifactDir = 'C:\\Users\\Richard Konsam\\.gemini\\antigravity-ide\\brain\\467f6d19-6dde-4f85-b59a-59f905273efa';
-                if (fs.existsSync(artifactDir)) {
-                    fs.copyFileSync(qrImgPath, path.join(artifactDir, 'qr.png'));
-                }
             } catch (qrErr) {
                 // non-fatal image generation error
             }
@@ -415,7 +418,7 @@ async function startBot() {
             log(`Bot ready! Connected to WhatsApp as: ${sock.user?.name || 'Owner'} (${myJid})`);
 
             // Greet Owner in "Message Yourself"
-            const power = getPowerStatus();
+            const power = await getPowerStatus();
             const powerText = power.isAcOnline ? '⚡ Plugged In (AC Electricity ON)' : `⚠️ Battery: ${power.batteryPct}% (Electric OFF)`;
 
             await sendInteractiveButtons({
@@ -538,7 +541,7 @@ async function startBot() {
                     lowerBody === '#status' || lowerBody === 'status' || lowerBody === '#server' || lowerBody === 'server' ||
                     lowerBody === 'btn_admin_status' || lowerBody.includes('status')
                 ) {
-                    const power = getPowerStatus();
+                    const power = await getPowerStatus();
                     const mem = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
                     const powerIcon = power.isAcOnline ? '⚡' : '⚠️';
                     const powerState = power.isAcOnline ? 'Plugged In (AC Power ON)' : 'Discharging (Electricity is OFF!)';
