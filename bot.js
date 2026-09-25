@@ -309,17 +309,26 @@ async function sendMsg(sock, jid, text) {
     }
 }
 
+function cleanJid(jid) {
+    if (!jid) return '';
+    try {
+        const norm = jidNormalizedUser(jid);
+        return norm.replace(/:.*@/, '@');
+    } catch (e) {
+        return (jid || '').replace(/:.*@/, '@');
+    }
+}
+
 /**
  * Smart Reply Router:
- * If chatting in "Message Yourself", sends to BOTH senderJid (@lid) and primary myJid (@s.whatsapp.net)
- * ensuring messages reliably appear in your WhatsApp conversation on phone & web.
+ * Always sends to the owner's WhatsApp JID (e.g. 919863013886@s.whatsapp.net) for Message Yourself chats
  */
 async function sendSmartReply(sock, senderJid, isMessageToSelf, text) {
     if (!text) return;
-    const myJid = jidNormalizedUser(sock.user?.id);
+    const myJid = cleanJid(sock.user?.id);
     if (isMessageToSelf) {
-        const targets = new Set([senderJid, myJid].filter(Boolean));
-        for (const target of targets) {
+        const target = myJid || (senderJid && !senderJid.endsWith('@lid') ? senderJid : null);
+        if (target) {
             await sendMsg(sock, target, text);
         }
     } else {
@@ -360,6 +369,8 @@ let pendingRestartTime = 0;
 let emergencyShutdownTriggered = false;
 let searchCount = 0;
 let botStartTime = Date.now();
+let greetedOnStartup = false;
+let watchdogsStarted = false;
 
 async function startBot() {
     log('Initializing Baileys Multi-Device Client...');
@@ -409,35 +420,44 @@ async function startBot() {
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             log(`Connection closed (status: ${statusCode}). Reconnecting: ${shouldReconnect}`);
             if (shouldReconnect) {
-                setTimeout(startBot, 3000);
+                // If another session connected (440 - Connection Replaced), wait 10s to avoid spam fight
+                const delay = statusCode === 440 ? 10000 : 3000;
+                setTimeout(startBot, delay);
             } else {
                 log('Device logged out. Delete session_auth folder and re-run to scan QR again.');
             }
         } else if (connection === 'open') {
-            const myJid = jidNormalizedUser(sock.user?.id);
+            const myJid = cleanJid(sock.user?.id || state?.creds?.me?.id);
             log(`Bot ready! Connected to WhatsApp as: ${sock.user?.name || 'Owner'} (${myJid})`);
 
-            // Greet Owner in "Message Yourself"
-            const power = await getPowerStatus();
-            const powerText = power.isAcOnline ? '⚡ Plugged In (AC Electricity ON)' : `⚠️ Battery: ${power.batteryPct}% (Electric OFF)`;
+            // Greet Owner ONLY ONCE on initial launch (not on every socket keepalive/reconnect)
+            if (!greetedOnStartup) {
+                greetedOnStartup = true;
+                const power = await getPowerStatus();
+                const powerText = power.isAcOnline ? '⚡ Plugged In (AC Electricity ON)' : `⚠️ Battery: ${power.batteryPct}% (Electric OFF)`;
 
-            await sendInteractiveButtons({
-                sock,
-                jid: myJid,
-                isMessageToSelf: true,
-                title: '🟢 NERIST Laptop Server Online',
-                body: `Server is active and running 24/7.\n\n• Power: ${powerText}\n• Campus Wi-Fi User: ${CAMPUS_WIFI_USER}\n• Memory: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(1)} MB`,
-                footer: 'NERIST Server Controller',
-                buttons: [
-                    { id: 'btn_admin_status', text: '📊 Check Server Status' },
-                    { id: 'btn_admin_wifi_login', text: '📶 Re-login Campus Wi-Fi' },
-                    { id: 'btn_admin_shutdown_req', text: '🛑 Shutdown Laptop' }
-                ]
-            });
+                await sendInteractiveButtons({
+                    sock,
+                    jid: myJid,
+                    isMessageToSelf: true,
+                    title: '🟢 NERIST Laptop Server Online',
+                    body: `Server is active and running 24/7.\n\n• Power: ${powerText}\n• Campus Wi-Fi User: ${CAMPUS_WIFI_USER}\n• Memory: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(1)} MB`,
+                    footer: 'NERIST Server Controller',
+                    buttons: [
+                        { id: 'btn_admin_status', text: '📊 Check Server Status' },
+                        { id: 'btn_admin_wifi_login', text: '📶 Re-login Campus Wi-Fi' },
+                        { id: 'btn_admin_shutdown_req', text: '🛑 Shutdown Laptop' }
+                    ]
+                });
+            }
 
-            // Start hardware power & wifi watchdogs
-            lastAcStatus = power.isAcOnline;
-            startWatchdogs(sock, myJid);
+            // Start hardware power & wifi watchdogs once
+            if (!watchdogsStarted) {
+                watchdogsStarted = true;
+                const power = await getPowerStatus();
+                lastAcStatus = power.isAcOnline;
+                startWatchdogs(sock, myJid);
+            }
         }
     });
 
@@ -452,24 +472,20 @@ async function startBot() {
             if (msg.key.id && botSentIds.has(msg.key.id)) continue;
 
             const senderJid = msg.key.remoteJid;
-            const normalizedJid = jidNormalizedUser(senderJid);
-            const myJid = jidNormalizedUser(sock.user?.id);
-            const myLid = sock.user?.lid ? jidNormalizedUser(sock.user.lid) : null;
+            const cleanSender = cleanJid(senderJid);
+            const myJid = cleanJid(sock.user?.id || state?.creds?.me?.id);
+            const myLid = cleanJid(sock.user?.lid || state?.creds?.me?.lid);
             const myPhone = (myJid || '').split('@')[0];
             const isFromMe = msg.key.fromMe === true;
             const isGroup = senderJid.endsWith('@g.us');
 
             // True if this is the "Message Yourself" chat
             const isMessageToSelf = !isGroup && (
-                normalizedJid === myJid ||
-                senderJid === myJid ||
-                (myPhone && senderJid.includes(myPhone)) ||
-                (myLid && (normalizedJid === myLid || senderJid === myLid))
+                cleanSender === myJid ||
+                cleanSender === myLid ||
+                (myPhone && cleanSender.includes(myPhone)) ||
+                (isFromMe && (senderJid.endsWith('@lid') || cleanSender === myJid || cleanSender === myLid))
             );
-
-            // CRITICAL FIX: When messaging yourself, WhatsApp sends remoteJid as @lid (e.g. 60769525878871@lid).
-            // Replying to @lid fails silently. We must always send to myJid (e.g. 919863013886@s.whatsapp.net).
-            const replyJid = isMessageToSelf ? myJid : senderJid;
 
             // Unwrap content
             const content = normalizeMessageContent(msg.message);
@@ -510,17 +526,17 @@ async function startBot() {
 
             if (!rawBody) continue;
 
-            // If it's outgoing from ourselves to another person/group (not Message Yourself), ignore
-            if (isFromMe && !isMessageToSelf) continue;
+            const lowerBody = rawBody.toLowerCase();
+
+            // If it's outgoing from ourselves to another person/group (not Message Yourself and not an admin command), ignore
+            if (isFromMe && !isMessageToSelf && !lowerBody.startsWith('#')) continue;
 
             log(`[MSG] fromMe=${isFromMe} toSelf=${isMessageToSelf} jid=${senderJid} text="${rawBody}"`);
-
-            const lowerBody = rawBody.toLowerCase();
 
             // =====================================================================
             // 🔒 ADMIN COMMANDS & BUTTONS (ONLY IN "MESSAGE YOURSELF")
             // =====================================================================
-            const isAdminCommand = isMessageToSelf && (
+            const isAdminCommand = (isMessageToSelf || (isFromMe && !isGroup)) && (
                 lowerBody.startsWith('#') ||
                 lowerBody.startsWith('btn_admin_') ||
                 ['status', 'server', 'shutdown', 'restart', 'wifilogin', 'helpadmin', 'settings', 'setting', 'menu', 'admin'].includes(lowerBody) ||
@@ -799,7 +815,7 @@ function startWatchdogs(sock, myJid) {
 
     // 2. Hardware Power & Battery Sensing Loop (runs every 30s)
     setInterval(async () => {
-        const power = getPowerStatus();
+        const power = await getPowerStatus();
         if (!power.success) return;
 
         // Detect Electricity Cut
