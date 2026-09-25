@@ -28,11 +28,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "Register-ScheduledTask -TaskName 'NERIST_WhatsApp_Bot' -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null; " ^
   "Write-Host '[OK] Windows Scheduled Task registered successfully.'"
 
+:: 3. Configure Windows 24/7 Server Power Plan
+echo.
+echo Configuring 24/7 Server Power Plan...
+powercfg -change -standby-timeout-ac 0 >nul 2>&1
+powercfg -change -hibernate-timeout-ac 0 >nul 2>&1
+powercfg -change -monitor-timeout-ac 5 >nul 2>&1
+powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0 >nul 2>&1
+powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0 >nul 2>&1
+powercfg -SetActive SCHEME_CURRENT >nul 2>&1
+echo [OK] Power settings configured:
+echo      - Sleep / Standby: NEVER (Laptop stays awake 24/7)
+echo      - Lid Closed: DO NOTHING (Safe to keep laptop lid closed)
+echo      - Display Timeout: 5 minutes (Saves screen wear and energy)
+
 echo.
 echo ==========================================================
-echo   Auto-start successfully configured!
-echo   The bot will automatically start whenever your laptop
-echo   turns on, logs in, or restarts!
+echo   24/7 Server setup successfully configured!
+echo   The bot will automatically start on boot and will
+echo   continue running 24/7 even with the lid closed!
 echo ==========================================================
 echo.
 pause

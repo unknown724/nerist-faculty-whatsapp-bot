@@ -25,10 +25,18 @@ if [ -n "$STARTUP_CMD" ]; then
     eval "$STARTUP_CMD"
 fi
 
+echo "=== 5. Disabling Laptop Sleep on Lid Close (24/7 Server Mode) ==="
+if [ -f /etc/systemd/logind.conf ]; then
+    sudo sed -i 's/#HandleLidSwitch=suspend/HandleLidSwitch=ignore/' /etc/systemd/logind.conf
+    sudo sed -i 's/HandleLidSwitch=suspend/HandleLidSwitch=ignore/' /etc/systemd/logind.conf
+    sudo systemctl restart systemd-logind 2>/dev/null || true
+fi
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
+
 echo "=============================================================================="
 echo " [OK] NERIST WhatsApp Bot is now configured to start automatically on boot!"
 echo " Useful commands:"
-echo "   pm2 status              # Check bot status"
+echo "   pm2 status                    # Check bot status"
 echo "   pm2 logs nerist-whatsapp-bot  # View live logs"
 echo "   pm2 restart nerist-whatsapp-bot # Restart bot"
 echo "   pm2 stop nerist-whatsapp-bot    # Stop bot"
