@@ -132,32 +132,106 @@ function resolveToPnJid(jid) {
     return jid;
 }
 
-async function sendNativeButtons({ sock, jid, title = '', body = '', footer = '', buttons = [] }) {
+async function sendNativeButtons({ sock, jid, title = '', body = '', footer = 'NERIST Directory', buttons = [] }) {
     if (!jid || !body) return;
     const targetJid = resolveToPnJid(jid);
 
-    let messageText = '';
-    if (title) messageText += `*${title}*\n\n`;
-    messageText += `${body}\n`;
-
-    if (buttons && buttons.length > 0) {
-        messageText += `\n`;
-        for (const btn of buttons) {
-            if (btn.url) {
-                messageText += `🔗 *${btn.text}:*\n${btn.url}\n\n`;
-            } else {
-                const shortcut = btn.id ? btn.id.replace('btn_', '@') : btn.text;
-                messageText += `╔═════════════════════════╗\n   ${btn.text}\n   👉 \`${shortcut}\`\n╚═════════════════════════╝\n`;
-            }
+    const nativeButtons = buttons.map((btn) => {
+        if (btn.url) {
+            return {
+                name: 'cta_url',
+                buttonParamsJson: JSON.stringify({
+                    display_text: btn.text,
+                    url: btn.url,
+                    merchant_url: btn.url,
+                }),
+            };
         }
-    }
-    if (footer) {
-        messageText += `\n_${footer}_`;
-    }
+        return {
+            name: 'quick_reply',
+            buttonParamsJson: JSON.stringify({
+                display_text: btn.text,
+                id: btn.id,
+            }),
+        };
+    });
 
-    const sent = await sendMsg(sock, targetJid, messageText.trim());
-    log(`Delivered student card to ${targetJid}`);
-    return sent;
+    try {
+        const waMsg = generateWAMessageFromContent(
+            targetJid,
+            {
+                viewOnceMessage: {
+                    message: {
+                        messageContextInfo: {
+                            deviceListMetadata: {},
+                            deviceListMetadataVersion: 2,
+                        },
+                        interactiveMessage: proto.Message.InteractiveMessage.fromObject({
+                            header: proto.Message.InteractiveMessage.Header.fromObject({
+                                title: title || '',
+                                hasMediaAttachment: false,
+                            }),
+                            body: proto.Message.InteractiveMessage.Body.fromObject({
+                                text: body,
+                            }),
+                            footer: proto.Message.InteractiveMessage.Footer.fromObject({
+                                text: footer || 'NERIST Directory',
+                            }),
+                            nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.fromObject({
+                                buttons: nativeButtons,
+                            }),
+                        }),
+                    },
+                },
+            },
+            { userJid: sock.user?.id }
+        );
+
+        const additionalNodes = [
+            {
+                tag: 'biz',
+                attrs: {},
+                content: [
+                    {
+                        tag: 'interactive',
+                        attrs: {
+                            type: 'native_flow',
+                            v: '1',
+                        },
+                        content: [
+                            {
+                                tag: 'native_flow',
+                                attrs: {
+                                    name: 'mixed',
+                                    v: '9',
+                                },
+                            },
+                        ],
+                    },
+                ],
+            },
+            {
+                tag: 'bot',
+                attrs: { biz_bot: '1' },
+            },
+        ];
+
+        await sock.relayMessage(targetJid, waMsg.message, {
+            messageId: waMsg.key.id,
+            additionalNodes,
+        });
+
+        if (waMsg?.key?.id) {
+            botSentIds.add(waMsg.key.id);
+        }
+        log(`Delivered native interactive quick reply buttons to ${targetJid}`);
+        return waMsg;
+    } catch (btnErr) {
+        log(`sendNativeButtons error: ${btnErr.message}, falling back to text`);
+        const fallbackText = `${title ? '*' + title + '*\n\n' : ''}${body}\n\n` +
+            buttons.map(b => b.url ? `🔗 ${b.text}: ${b.url}` : `👉 \`${b.id}\``).join('\n');
+        return sendMsg(sock, targetJid, fallbackText.trim());
+    }
 }
 
 async function startBusinessBot() {
@@ -254,6 +328,23 @@ async function startBusinessBot() {
             log(`[BUSINESS MSG] fromMe=${msg.key.fromMe} jid=${senderJid} text="${rawBody}"`);
 
             // -----------------------------------------------------------------
+            // 👋 GREETINGS & MENU
+            // -----------------------------------------------------------------
+            if (['hi', 'hello', 'hey', 'start', 'help', 'menu'].includes(lowerBody)) {
+                await sendNativeButtons({
+                    sock,
+                    jid: senderJid,
+                    title: 'NERIST Student Directory',
+                    body: `👋 *Welcome to NERIST Student Assistant*\n\nSearch any student by name or registration number:\n• Example: \`@student meira\`\n• Example: \`@student 121/108\`\n\nTap the button below to try a search!`,
+                    footer: 'PrintKurox Student Bot',
+                    buttons: [
+                        { id: '@student meira', text: '🔍 Search Example' }
+                    ]
+                });
+                continue;
+            }
+
+            // -----------------------------------------------------------------
             // 🎓 STUDENT SEARCH (@student <name or roll>)
             // -----------------------------------------------------------------
             let studentQuery = '';
@@ -261,7 +352,7 @@ async function startBusinessBot() {
                 studentQuery = rawBody.slice(8).trim();
             } else if (lowerBody.startsWith('student ')) {
                 studentQuery = rawBody.slice(8).trim();
-            } else if (!lowerBody.startsWith('@dossier') && !lowerBody.startsWith('!dossier') && !lowerBody.startsWith('dossier ')) {
+            } else if (!lowerBody.startsWith('@dossier') && !lowerBody.startsWith('!dossier') && !lowerBody.startsWith('dossier ') && !lowerBody.startsWith('dossier_')) {
                 // Auto-match student names or roll numbers in private chat
                 const check = searchStudents(rawBody);
                 if (check.length > 0) {
@@ -307,6 +398,8 @@ async function startBusinessBot() {
             // -----------------------------------------------------------------
             let dossierQuery = '';
             if (lowerBody.startsWith('@dossier') || lowerBody.startsWith('!dossier')) {
+                dossierQuery = rawBody.slice(8).trim();
+            } else if (lowerBody.startsWith('dossier_')) {
                 dossierQuery = rawBody.slice(8).trim();
             } else if (lowerBody.startsWith('dossier ')) {
                 dossierQuery = rawBody.slice(8).trim();
