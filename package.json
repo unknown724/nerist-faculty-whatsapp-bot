@@ -5,6 +5,7 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
+    "start:business": "node bot_business.js",
     "test": "node test_search.js"
   },
   "keywords": [
