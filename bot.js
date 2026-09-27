@@ -825,10 +825,8 @@ Please contact the Student Bot at: *+919362980761*`,
                 return;
             }
 
-            // Redirect any @student attempts on personal number to the business number
-            if (lowerBody.startsWith('@student') || lowerBody.startsWith('!student') || lowerBody.startsWith('@dossier') || lowerBody.startsWith('!dossier')) {
-                if (isGroup) return;
-                await sendSmartReply(sock, senderJid, isMessageToSelf, '🎓 *Student Search has moved!* Please message our official bot at *+919362980761* for student profile and dossier lookups.');
+            // Silently ignore any @student or @dossier attempts on personal number (9863013886)
+            if (lowerBody.startsWith('@student') || lowerBody.startsWith('!student') || lowerBody.startsWith('student ') || lowerBody.startsWith('@dossier') || lowerBody.startsWith('!dossier') || lowerBody.startsWith('dossier ')) {
                 return;
             }
 
