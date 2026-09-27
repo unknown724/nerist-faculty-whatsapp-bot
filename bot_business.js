@@ -523,18 +523,20 @@ async function startBusinessBot() {
                 }
 
                 const payMsg =
-                    `💳 *DIRECT UPI PAYMENT: ₹${amount}*\n` +
+                    `🏛️ *NERIST SERVER RESOURCE CONTRIBUTION*\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `📌 *Plan:* ${planTitle}\n` +
-                    `💰 *Amount:* *₹${amount}.00*\n` +
+                    `💰 *Allocation Fee:* *₹${amount}.00*\n` +
                     `📱 *UPI ID:* \`${UPI_VPA}\` _(Tap to copy)_\n` +
                     `📞 *UPI Phone:* \`${UPI_PHONE}\` _(GPay / PhonePe / Paytm)_\n` +
-                    `👤 *Recipient:* ${UPI_NAME}\n\n` +
+                    `👤 *Beneficiary:* ${UPI_NAME}\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                    `🚀 *Instant Activation:*\n` +
-                    `1. Scan this QR or pay ₹${amount} to UPI ID or Phone Number\n` +
-                    `2. Copy the **12-digit UTR / UPI Ref No.** from payment receipt\n` +
-                    `3. Send it here (e.g. \`429184910283\`) to unlock immediately!`;
+                    `⚡ *Instant Automated Unlock Instructions:*\n` +
+                    `1. Scan this QR or transfer ₹${amount} via your UPI app.\n` +
+                    `2. Open your payment receipt in GPay / PhonePe / Paytm.\n` +
+                    `3. Locate the **12-digit UPI Reference / UTR Number**.\n` +
+                    `4. Reply here with that 12-digit number (e.g. \`429184910283\`).\n\n` +
+                    `The system validates the reference and decrypts the record immediately!`;
 
                 if (qrBuffer) {
                     await sock.sendMessage(senderJid, {
@@ -545,6 +547,27 @@ async function startBusinessBot() {
                     await sendMsg(sock, senderJid, payMsg);
                 }
                 log(`Sent UPI payment instructions (₹${amount}) to ${userPhone}`);
+                continue;
+            }
+
+            // -----------------------------------------------------------------
+            // ❓ UTR & VERIFICATION ASSISTANCE GUIDE
+            // -----------------------------------------------------------------
+            if (buttonId === 'info_utr' || lowerBody === 'utr' || lowerBody === 'how to pay') {
+                const guideText =
+                    `📋 *HOW TO VERIFY PAYMENT INSTANTLY*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `After transferring ₹3 or ₹119 in your payment app:\n\n` +
+                    `1. Open the payment receipt inside your UPI app.\n` +
+                    `2. Locate the **12-digit UPI Reference Number / UTR**:\n` +
+                    `   • *Google Pay:* Tap the payment ➔ Look for \`UPI transaction ID\`\n` +
+                    `   • *PhonePe:* Tap the payment ➔ Look for \`UTR\`\n` +
+                    `   • *Paytm:* Tap the transaction ➔ Look for \`UPI Ref No.\`\n` +
+                    `   • *BHIM / Banking Apps:* Look for \`UTR / RRN / 12-Digit Ref\`\n\n` +
+                    `3. Copy or type that 12-digit number directly into this chat (e.g. \`429184910283\`).\n\n` +
+                    `⚡ *Automated Decryption:* The server validates the transaction reference and instantly unlocks your requested dossier!`;
+
+                await sendMsg(sock, senderJid, guideText);
                 continue;
             }
 
@@ -726,25 +749,30 @@ async function startBusinessBot() {
                 if (!access.allowed) {
                     const cleanRollToken = targetRoll.replace(/[^a-zA-Z0-9]/g, '_');
                     const limitBody =
-                        `⚠️ *Daily Free Limit Reached (3/3 Used)*\n` +
+                        `⚠️ *Fair Usage Limit Reached (3/3 Used)*\n` +
                         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                        `Free tier allows 3 dossier unlocks per day.\n` +
-                        `To support 24/7 laptop server hosting:\n\n` +
-                        `👉 *1 Extra Unlock:* *₹3*\n` +
-                        `👉 *Monthly Pass (30 Days Unlimited):* *₹119*`;
+                        `Under the *NERIST Student Directory Policy*, accounts receive 3 complimentary dossier unlocks per 24 hours to prevent automated scraping and ensure fair server access.\n\n` +
+                        `To support dedicated 24/7 campus server hosting & computational infrastructure, additional decrypt tokens are allocated below:\n\n` +
+                        `🔹 *Single Unlock Token:* *₹3*\n` +
+                        `_(Decrypt 1 additional confidential profile)_\n\n` +
+                        `🔹 *Campus Pass (30 Days Unlimited):* *₹119*\n` +
+                        `_(Continuous unrestricted directory access)_\n` +
+                        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `_Select an option below to initiate instant token activation:_`;
 
                     await sendNativeButtons({
                         sock,
                         jid: senderJid,
-                        title: 'Daily Limit Reached',
+                        title: 'Directory Capacity Notice',
                         body: limitBody,
-                        footer: 'NERIST Server Hosting Fund',
+                        footer: 'NERIST Server Resource Allocation',
                         buttons: [
                             { id: `pay_single_${cleanRollToken}`, text: '💳 Unlock for ₹3' },
-                            { id: 'pay_monthly', text: '🌟 Monthly Pass (₹119)' }
+                            { id: 'pay_monthly', text: '🌟 Monthly Pass (₹119)' },
+                            { id: 'info_utr', text: '❓ How to Verify UTR' }
                         ]
                     });
-                    log(`Daily limit reached for ${userPhone}. Sent payment card.`);
+                    log(`Daily limit reached for ${userPhone}. Sent professional capacity card.`);
                     continue;
                 }
 
