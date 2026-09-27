@@ -10,6 +10,7 @@
  * =============================================================================
  */
 
+require('dotenv').config();
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -32,6 +33,105 @@ function log(...args) {
     const timestamp = new Date().toLocaleString();
     console.log(`[BUSINESS BOT ${timestamp}]`, ...args);
 }
+
+// =============================================================================
+// QUOTA & DIRECT UPI PAYMENT CONFIGURATION
+// =============================================================================
+const QUOTA_FILE = path.join(__dirname, 'user_quotas.json');
+const ADMIN_PHONE = (process.env.ADMIN_PHONE || '9863013886').replace(/[^0-9]/g, '').slice(-10);
+const ADMIN_JID = `${process.env.ADMIN_PHONE || '9863013886'}@s.whatsapp.net`.replace(/^(\d{10})@/, '91$1@');
+const UPI_VPA = process.env.UPI_VPA || '9863013886@upi';
+const UPI_NAME = process.env.UPI_NAME || 'Devananda Wahengbam';
+const DAILY_FREE_LIMIT = 3;
+
+function loadQuotas() {
+    try {
+        if (fs.existsSync(QUOTA_FILE)) {
+            return JSON.parse(fs.readFileSync(QUOTA_FILE, 'utf8'));
+        }
+    } catch (e) {}
+    return { quotas: {}, usedUtrs: {} };
+}
+
+function saveQuotas(data) {
+    try {
+        fs.writeFileSync(QUOTA_FILE, JSON.stringify(data, null, 2), 'utf8');
+    } catch (e) {
+        log('Error saving user quotas:', e.message);
+    }
+}
+
+function checkUserAccess(phone) {
+    if (!phone) return { allowed: false, reason: 'unknown_user' };
+    const cleanPhone = phone.replace(/[^0-9]/g, '').slice(-10);
+
+    // 1. Admin VIP bypass (Devananda - Permanent Unlimited)
+    if (cleanPhone === ADMIN_PHONE) {
+        return { allowed: true, isAdmin: true, remaining: 999 };
+    }
+
+    const data = loadQuotas();
+    const today = new Date().toISOString().slice(0, 10);
+    const userRec = data.quotas[cleanPhone] || { lastDate: today, dailyUsed: 0, paidCredits: 0, passExpiresAt: null };
+
+    // 2. Monthly Unlimited Pass
+    if (userRec.passExpiresAt && new Date(userRec.passExpiresAt) > new Date()) {
+        const daysLeft = Math.ceil((new Date(userRec.passExpiresAt) - new Date()) / (1000 * 60 * 60 * 24));
+        return { allowed: true, hasPass: true, daysLeft };
+    }
+
+    // 3. Paid Single Unlock Credits
+    if ((userRec.paidCredits || 0) > 0) {
+        return { allowed: true, hasPaidCredit: true, paidCredits: userRec.paidCredits };
+    }
+
+    // 4. Daily Free Quota
+    if (userRec.lastDate !== today) {
+        userRec.lastDate = today;
+        userRec.dailyUsed = 0;
+        data.quotas[cleanPhone] = userRec;
+        saveQuotas(data);
+    }
+
+    if ((userRec.dailyUsed || 0) < DAILY_FREE_LIMIT) {
+        const remaining = DAILY_FREE_LIMIT - (userRec.dailyUsed || 0);
+        return { allowed: true, dailyUsed: userRec.dailyUsed || 0, remaining };
+    }
+
+    return { allowed: false, dailyUsed: userRec.dailyUsed, remaining: 0 };
+}
+
+function consumeUserCredit(phone) {
+    if (!phone) return;
+    const cleanPhone = phone.replace(/[^0-9]/g, '').slice(-10);
+    if (cleanPhone === ADMIN_PHONE) return;
+
+    const data = loadQuotas();
+    const today = new Date().toISOString().slice(0, 10);
+    const userRec = data.quotas[cleanPhone] || { lastDate: today, dailyUsed: 0, paidCredits: 0, passExpiresAt: null };
+
+    if (userRec.passExpiresAt && new Date(userRec.passExpiresAt) > new Date()) {
+        return; // Monthly pass: unlimited unlocks without deduction
+    }
+
+    if ((userRec.paidCredits || 0) > 0) {
+        userRec.paidCredits -= 1;
+    } else {
+        if (userRec.lastDate !== today) {
+            userRec.lastDate = today;
+            userRec.dailyUsed = 0;
+        }
+        userRec.dailyUsed = (userRec.dailyUsed || 0) + 1;
+    }
+
+    data.quotas[cleanPhone] = userRec;
+    saveQuotas(data);
+}
+
+// In-memory mapping for user interactions
+const userLastStudent = new Map();
+const userPendingPayment = new Map();
+const studentCleanIdMap = new Map();
 
 // Load student database
 let studentsList = [];
@@ -230,10 +330,7 @@ async function sendNativeButtons({ sock, jid, title = '', body = '', footer = 'N
     }
 }
 
-// Memory mapping for robust button callbacks
-const userLastStudent = new Map();
-const studentCleanIdMap = new Map();
-
+// Populate student clean ID index for button callbacks
 for (const s of studentsList) {
     if (s.user_id) {
         const cleanKey = s.user_id.replace(/[^a-zA-Z0-9]/g, '_');
@@ -354,7 +451,173 @@ async function startBusinessBot() {
 
             if (!rawBody) continue;
             const lowerBody = rawBody.toLowerCase();
-            log(`[BUSINESS MSG] fromMe=${msg.key.fromMe} jid=${senderJid} text="${rawBody}" (buttonId=${buttonId})`);
+            const targetPnJid = resolveToPnJid(senderJid);
+            const userPhone = targetPnJid.split('@')[0].replace(/[^0-9]/g, '').slice(-10);
+            log(`[BUSINESS MSG] fromMe=${msg.key.fromMe} jid=${senderJid} phone=${userPhone} text="${rawBody}" (buttonId=${buttonId})`);
+
+            // -----------------------------------------------------------------
+            // 👑 ADMIN DIRECT MANAGEMENT HOOKS (Devananda only)
+            // -----------------------------------------------------------------
+            if (userPhone === ADMIN_PHONE) {
+                if (lowerBody.startsWith('#grant ')) {
+                    const parts = rawBody.slice(7).trim().split(/\s+/);
+                    const targetNum = parts[0]?.replace(/[^0-9]/g, '').slice(-10);
+                    const amount = parseInt(parts[1], 10) || 1;
+                    if (targetNum) {
+                        const data = loadQuotas();
+                        const today = new Date().toISOString().slice(0, 10);
+                        const userRec = data.quotas[targetNum] || { lastDate: today, dailyUsed: 0, paidCredits: 0, passExpiresAt: null };
+                        userRec.paidCredits = (userRec.paidCredits || 0) + amount;
+                        data.quotas[targetNum] = userRec;
+                        saveQuotas(data);
+                        await sendMsg(sock, senderJid, `✅ Granted ${amount} paid unlock credits to +91${targetNum}. Total: ${userRec.paidCredits}`);
+                        continue;
+                    }
+                } else if (lowerBody.startsWith('#pass ')) {
+                    const targetNum = rawBody.slice(6).trim().replace(/[^0-9]/g, '').slice(-10);
+                    if (targetNum) {
+                        const data = loadQuotas();
+                        const today = new Date().toISOString().slice(0, 10);
+                        const userRec = data.quotas[targetNum] || { lastDate: today, dailyUsed: 0, paidCredits: 0, passExpiresAt: null };
+                        const expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+                        userRec.passExpiresAt = expiry;
+                        data.quotas[targetNum] = userRec;
+                        saveQuotas(data);
+                        await sendMsg(sock, senderJid, `🌟 Activated 30-Day Monthly Pass for +91${targetNum}. Valid until: ${expiry.slice(0, 10)}`);
+                        continue;
+                    }
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // 💳 DIRECT UPI PAYMENT DISPATCH (₹3 Single or ₹119 Monthly)
+            // -----------------------------------------------------------------
+            if (buttonId && (buttonId.startsWith('pay_single_') || buttonId === 'pay_monthly')) {
+                const isMonthly = buttonId === 'pay_monthly';
+                const amount = isMonthly ? 119 : 3;
+                const cleanToken = isMonthly ? '' : buttonId.replace('pay_single_', '');
+                const targetRoll = cleanToken ? (studentCleanIdMap.get(cleanToken) || cleanToken.replace(/_/g, '/')) : '';
+                const note = isMonthly ? 'NERIST_Monthly_Pass' : `Dossier_${cleanToken}`;
+                const planTitle = isMonthly ? 'Monthly Unlimited Pass (30 Days)' : '1 Extra Dossier Unlock';
+
+                // Save pending unlock intent for this user
+                userPendingPayment.set(userPhone, {
+                    type: isMonthly ? 'monthly' : 'single',
+                    targetRoll,
+                    amount,
+                    timestamp: Date.now()
+                });
+
+                const upiUrl = `upi://pay?pa=${encodeURIComponent(UPI_VPA)}&pn=${encodeURIComponent(UPI_NAME)}&am=${amount}&cu=INR&tn=${encodeURIComponent(note)}`;
+
+                let qrBuffer = null;
+                try {
+                    qrBuffer = await QRCodeImage.toBuffer(upiUrl, {
+                        width: 420,
+                        margin: 2,
+                        color: { dark: '#000000', light: '#ffffff' }
+                    });
+                } catch (e) {
+                    log('Error generating payment QR:', e.message);
+                }
+
+                const payMsg =
+                    `💳 *DIRECT UPI PAYMENT: ₹${amount}*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `📌 *Plan:* ${planTitle}\n` +
+                    `💰 *Amount:* *₹${amount}.00*\n` +
+                    `📱 *UPI ID:* \`${UPI_VPA}\` _(Tap to copy)_\n` +
+                    `👤 *Recipient:* ${UPI_NAME}\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `🚀 *Instant Activation:*\n` +
+                    `1. Scan this QR or pay ₹${amount} via *GPay / PhonePe / Paytm / BHIM*\n` +
+                    `2. Copy the **12-digit UTR / UPI Ref No.** from payment receipt\n` +
+                    `3. Send it here (e.g. \`429184910283\`) to unlock immediately!`;
+
+                if (qrBuffer) {
+                    await sock.sendMessage(senderJid, {
+                        image: qrBuffer,
+                        caption: payMsg
+                    });
+                } else {
+                    await sendMsg(sock, senderJid, payMsg);
+                }
+                log(`Sent UPI payment instructions (₹${amount}) to ${userPhone}`);
+                continue;
+            }
+
+            // -----------------------------------------------------------------
+            // 📝 12-DIGIT UTR / REFERENCE VERIFICATION
+            // -----------------------------------------------------------------
+            const utrMatch = rawBody.match(/\b\d{12}\b/);
+            if (utrMatch && !rawBody.startsWith('@student') && !rawBody.startsWith('student ')) {
+                const utr = utrMatch[0];
+                const data = loadQuotas();
+
+                if (data.usedUtrs && data.usedUtrs[utr]) {
+                    await sendMsg(sock, senderJid, `❌ *UTR Already Redeemed*\nThis 12-digit reference (\`${utr}\`) has already been claimed.`);
+                    continue;
+                }
+
+                const pending = userPendingPayment.get(userPhone) || { type: 'single', amount: 3 };
+                const today = new Date().toISOString().slice(0, 10);
+                const userRec = data.quotas[userPhone] || { lastDate: today, dailyUsed: 0, paidCredits: 0, passExpiresAt: null };
+
+                if (!data.usedUtrs) data.usedUtrs = {};
+
+                if (pending.type === 'monthly' || pending.amount >= 119) {
+                    // Activate 30-day monthly pass
+                    const expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+                    userRec.passExpiresAt = expiry;
+                    data.usedUtrs[utr] = { phone: userPhone, amount: 119, type: 'monthly', timestamp: Date.now() };
+                    data.quotas[userPhone] = userRec;
+                    saveQuotas(data);
+
+                    await sendMsg(sock, senderJid,
+                        `🎉 *MONTHLY PASS ACTIVATED!*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `✅ Verified UTR: \`${utr}\`\n` +
+                        `🌟 You now have **Unlimited Dossier Unlocks** for 30 days!\n` +
+                        `📅 Valid until: ${expiry.slice(0, 10)}`
+                    );
+
+                    // Notify Admin
+                    try {
+                        await sock.sendMessage(ADMIN_JID, {
+                            text: `🔔 *MONTHLY PASS ACTIVATED (₹119)*\n👤 User: +91${userPhone}\n📝 UTR: \`${utr}\`\n📅 Valid for 30 Days`
+                        });
+                    } catch (e) {}
+                    userPendingPayment.delete(userPhone);
+                    continue;
+                } else {
+                    // Add 1 single unlock credit
+                    userRec.paidCredits = (userRec.paidCredits || 0) + 1;
+                    data.usedUtrs[utr] = { phone: userPhone, amount: 3, type: 'single', timestamp: Date.now() };
+                    data.quotas[userPhone] = userRec;
+                    saveQuotas(data);
+
+                    await sendMsg(sock, senderJid,
+                        `✅ *PAYMENT VERIFIED (₹3)*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `📝 UTR: \`${utr}\`\n` +
+                        `🔓 1 Dossier Unlock Credit added to your account!`
+                    );
+
+                    // Notify Admin
+                    try {
+                        await sock.sendMessage(ADMIN_JID, {
+                            text: `🔔 *PAYMENT RECEIVED (₹3)*\n👤 User: +91${userPhone}\n📝 UTR: \`${utr}\`\n🎓 Target: \`${pending.targetRoll || 'General'}\``
+                        });
+                    } catch (e) {}
+
+                    // Auto-unlock if user was in middle of unlocking a student!
+                    if (pending.targetRoll) {
+                        dossierQuery = pending.targetRoll;
+                    }
+                    userPendingPayment.delete(userPhone);
+                    if (!dossierQuery) continue;
+                }
+            }
 
             // -----------------------------------------------------------------
             // 👋 GREETINGS & MENU
@@ -456,6 +719,36 @@ async function startBusinessBot() {
                 const targetName = top ? top.full_name : 'Student';
                 const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${targetRoll.replace(/\//g, '_')}.jpg`;
 
+                // Quota & Abuse Prevention Check
+                const access = checkUserAccess(userPhone);
+                if (!access.allowed) {
+                    const cleanRollToken = targetRoll.replace(/[^a-zA-Z0-9]/g, '_');
+                    const limitBody =
+                        `⚠️ *Daily Free Limit Reached (3/3 Used)*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `Free tier allows 3 dossier unlocks per day.\n` +
+                        `To support 24/7 laptop server hosting:\n\n` +
+                        `👉 *1 Extra Unlock:* *₹3*\n` +
+                        `👉 *Monthly Pass (30 Days Unlimited):* *₹119*`;
+
+                    await sendNativeButtons({
+                        sock,
+                        jid: senderJid,
+                        title: 'Daily Limit Reached',
+                        body: limitBody,
+                        footer: 'NERIST Server Hosting Fund',
+                        buttons: [
+                            { id: `pay_single_${cleanRollToken}`, text: '💳 Unlock for ₹3' },
+                            { id: 'pay_monthly', text: '🌟 Monthly Pass (₹119)' }
+                        ]
+                    });
+                    log(`Daily limit reached for ${userPhone}. Sent payment card.`);
+                    continue;
+                }
+
+                // Consume credit
+                consumeUserCredit(userPhone);
+
                 // 1. Instant Reaction Animation
                 sock.sendMessage(senderJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
                 sock.sendPresenceUpdate('composing', senderJid).catch(() => {});
@@ -499,6 +792,16 @@ async function startBusinessBot() {
                     if (dossier.parentsMobile) dossierText += `📞 *Parent Phone:* ${dossier.parentsMobile}\n`;
                     if (dossier.address) dossierText += `🏠 *Address/Pin:* ${dossier.address}\n`;
                     if (dossier.aadhaar) dossierText += `🪪 *Aadhaar:* \`${dossier.aadhaar}\`\n`;
+
+                    if (access.isAdmin) {
+                        dossierText += `\n_👑 VIP Admin Access (Unlimited)_`;
+                    } else if (access.hasPass) {
+                        dossierText += `\n_🌟 Monthly Pass Active (${access.daysLeft} days remaining)_`;
+                    } else if (access.hasPaidCredit) {
+                        dossierText += `\n_💳 Paid Credit Used (${access.paidCredits - 1} remaining)_`;
+                    } else {
+                        dossierText += `\n_⚡ Free Unlocks Remaining Today: ${Math.max(0, access.remaining - 1)}/3_`;
+                    }
 
                     try {
                         await sock.sendMessage(senderJid, {
