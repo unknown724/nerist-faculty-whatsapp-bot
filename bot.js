@@ -406,9 +406,83 @@ async function sendSmartReply(sock, senderJid, isMessageToSelf, text, imageUrl =
 }
 
 /**
- * Formats Clean, Actionable Admin Menus with one-tap copyable WhatsApp command blocks
+ * Formats and sends WhatsApp Native Flow Interactive Messages with Quick Reply Buttons (like IndiGo bot)
+ * Falls back to clean markdown commands if client or relay fails
  */
-async function sendInteractiveButtons({ sock, jid, title, body, footer = '', buttons = [], isMessageToSelf = false, imageUrl = null }) {
+async function sendInteractiveButtons({ sock, jid, title = '', body = '', footer = '', buttons = [], isMessageToSelf = false, imageUrl = null }) {
+    const myJid = cleanJid(sock.user?.id);
+    const target = isMessageToSelf ? (myJid || (jid && !jid.endsWith('@lid') ? jid : null)) : jid;
+    if (!target) return;
+
+    // Convert buttons to Native Flow button format
+    const nativeButtons = [];
+    for (const btn of (buttons || [])) {
+        if (btn.url) {
+            nativeButtons.push({
+                name: 'cta_url',
+                buttonParamsJson: JSON.stringify({
+                    display_text: btn.text || 'Open Link',
+                    url: btn.url,
+                    merchant_url: btn.url
+                })
+            });
+        } else {
+            nativeButtons.push({
+                name: 'quick_reply',
+                buttonParamsJson: JSON.stringify({
+                    display_text: btn.text || 'Action',
+                    id: btn.id || btn.text
+                })
+            });
+        }
+    }
+
+    if (nativeButtons.length > 0 && !imageUrl) {
+        try {
+            const interactiveMessage = proto.Message.InteractiveMessage.create({
+                body: proto.Message.InteractiveMessage.Body.create({
+                    text: body || ''
+                }),
+                footer: proto.Message.InteractiveMessage.Footer.create({
+                    text: footer || 'NERIST Campus Assistant'
+                }),
+                header: proto.Message.InteractiveMessage.Header.create({
+                    title: title || '',
+                    hasMediaAttachment: false
+                }),
+                nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+                    buttons: nativeButtons
+                })
+            });
+
+            const msg = generateWAMessageFromContent(target, {
+                viewOnceMessage: {
+                    message: {
+                        messageContextInfo: {
+                            deviceListMetadata: {},
+                            deviceListMetadataVersion: 2
+                        },
+                        interactiveMessage
+                    }
+                }
+            }, { quoted: null });
+
+            if (msg?.key?.id) {
+                botSentIds.add(msg.key.id);
+                if (botSentIds.size > 500) {
+                    const first = botSentIds.values().next().value;
+                    botSentIds.delete(first);
+                }
+            }
+
+            await sock.relayMessage(target, msg.message, { messageId: msg.key.id });
+            return msg;
+        } catch (err) {
+            log(`Native interactive message relay failed: ${err.message}. Falling back to text.`);
+        }
+    }
+
+    // Fallback: format as clean text with quick actions
     let messageText = '';
     if (title) messageText += `*${title}*\n\n`;
     messageText += `${body}\n`;
@@ -428,7 +502,7 @@ async function sendInteractiveButtons({ sock, jid, title, body, footer = '', but
         messageText += `\n_${footer}_`;
     }
 
-    return await sendSmartReply(sock, jid, isMessageToSelf, messageText.trim(), imageUrl);
+    return await sendSmartReply(sock, target, false, messageText.trim(), imageUrl);
 }
 
 // Global runtime state
@@ -856,17 +930,14 @@ Send \`@student <name or roll no>\`
                 if (sMatches.length > 0) {
                     const top = sMatches[0];
                     const rollNo = top.user_id || 'N/A';
-                    const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${rollNo.replace(/\//g, '_')}.jpg`;
 
                     let replyBody = `🎓 *${top.full_name}*\n` +
                                     `🆔 *Roll No:* \`${rollNo}\`\n` +
                                     `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
-                                    `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
-                                    `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
-                                    (top.state ? `📍 *State:* ${top.state}\n` : '');
+                                    `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})`;
 
                     if (sMatches.length > 1) {
-                        replyBody += `\n_Also found (${sMatches.length - 1} more):_\n` +
+                        replyBody += `\n\n_Also found (${sMatches.length - 1} more):_\n` +
                                      sMatches.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
                     }
 
@@ -877,12 +948,11 @@ Send \`@student <name or roll no>\`
                         title: 'NERIST Student Profile',
                         body: replyBody.trim(),
                         footer: 'Confidential dossier is locked',
-                        imageUrl: photoUrl,
                         buttons: [
                             { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' }
                         ]
                     });
-                    log(`Answered @student "${studentQuery}" with photo and unlock button.`);
+                    log(`Answered @student "${studentQuery}" with quick reply button.`);
                 } else {
                     await sendSmartReply(sock, senderJid, isMessageToSelf, 'No student found in NERIST database.');
                     log(`Answered @student "${studentQuery}" with: No student found`);
@@ -916,7 +986,7 @@ Send \`@student <name or roll no>\`
                 const dossier = await fetchDossier(targetRoll);
 
                 if (dossier) {
-                    let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n` +
+                    let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n\n` +
                                       `👤 *${targetName}*\n` +
                                       `🆔 *Roll No:* \`${targetRoll}\`\n`;
 
@@ -966,17 +1036,14 @@ Send \`@student <name or roll no>\`
                         // Redirect to student search
                         const top = studentCheck[0];
                         const rollNo = top.user_id || 'N/A';
-                        const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${rollNo.replace(/\//g, '_')}.jpg`;
 
                         let replyBody = `🎓 *${top.full_name}*\n` +
                                         `🆔 *Roll No:* \`${rollNo}\`\n` +
                                         `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
-                                        `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
-                                        `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
-                                        (top.state ? `📍 *State:* ${top.state}\n` : '');
+                                        `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})`;
 
                         if (studentCheck.length > 1) {
-                            replyBody += `\n_Also found (${studentCheck.length - 1} more):_\n` +
+                            replyBody += `\n\n_Also found (${studentCheck.length - 1} more):_\n` +
                                          studentCheck.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
                         }
 
@@ -987,12 +1054,11 @@ Send \`@student <name or roll no>\`
                             title: 'NERIST Student Profile',
                             body: replyBody.trim(),
                             footer: 'Confidential dossier is locked',
-                            imageUrl: photoUrl,
                             buttons: [
                                 { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' }
                             ]
                         });
-                        log(`Auto-matched student "${rawBody}" with photo.`);
+                        log(`Auto-matched student "${rawBody}" with quick reply button.`);
                         return;
                     }
                 }
