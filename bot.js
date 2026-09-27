@@ -30,6 +30,7 @@ const QRCodeImage = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const { execSync, exec } = require('child_process');
+const { fetchDossier } = require('./dossier');
 
 // 1. Load .env configuration
 function loadEnv() {
@@ -837,13 +838,29 @@ Send \`@student <name or roll no>\`
                     const rollNo = top.user_id || 'N/A';
                     const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${rollNo.replace(/\//g, '_')}.jpg`;
 
+                    // Attempt fetching unlocked dossier details (phone, email, parents, dob, etc.)
+                    const dossier = await fetchDossier(rollNo);
+
                     let replyBody = `🎓 *${top.full_name}*\n` +
                                     `🆔 *Roll No:* \`${rollNo}\`\n` +
                                     `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
                                     `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
                                     `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
-                                    (top.state ? `📍 *State:* ${top.state}\n` : '') +
-                                    `🖼️ *Photo:* ${photoUrl}`;
+                                    (top.state ? `📍 *State:* ${top.state}\n` : '');
+
+                    if (dossier) {
+                        replyBody += `\n📋 *UNLOCKED DOSSIER:*\n`;
+                        if (dossier.phone) replyBody += `📱 *Phone:* ${dossier.phone}\n`;
+                        if (dossier.email) replyBody += `📧 *Email:* ${dossier.email}\n`;
+                        if (dossier.dob) replyBody += `🎂 *DOB:* ${dossier.dob}\n`;
+                        if (dossier.fatherName) replyBody += `👨 *Father:* ${dossier.fatherName}\n`;
+                        if (dossier.motherName) replyBody += `👩 *Mother:* ${dossier.motherName}\n`;
+                        if (dossier.parentsMobile) replyBody += `📞 *Parent Phone:* ${dossier.parentsMobile}\n`;
+                        if (dossier.address) replyBody += `🏠 *Pincode/Addr:* ${dossier.address}\n`;
+                        if (dossier.aadhaar) replyBody += `🪪 *Aadhaar:* \`${dossier.aadhaar}\`\n`;
+                    }
+
+                    replyBody += `\n🖼️ *Photo:* ${photoUrl}`;
 
                     if (sMatches.length > 1) {
                         replyBody += `\n\n_Also found (${sMatches.length - 1} more):_\n` +
@@ -851,7 +868,7 @@ Send \`@student <name or roll no>\`
                     }
 
                     await sendSmartReply(sock, senderJid, isMessageToSelf, replyBody.trim());
-                    log(`Answered @student "${studentQuery}" with ${sMatches.length} matches.`);
+                    log(`Answered @student "${studentQuery}" with ${sMatches.length} matches (dossier: ${dossier ? 'yes' : 'no'}).`);
                 } else {
                     await sendSmartReply(sock, senderJid, isMessageToSelf, 'No student found in NERIST database.');
                     log(`Answered @student "${studentQuery}" with: No student found`);
