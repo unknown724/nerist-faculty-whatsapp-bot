@@ -406,95 +406,22 @@ async function sendSmartReply(sock, senderJid, isMessageToSelf, text, imageUrl =
 }
 
 /**
- * Formats and sends WhatsApp Native Flow Interactive Messages with Quick Reply Buttons (like IndiGo bot)
- * Falls back to clean markdown commands if client or relay fails
+ * Formats Clean, Actionable Interactive Button Cards with one-tap copyable WhatsApp command blocks
+ * Works 100% reliably across all WhatsApp versions and devices without being blocked by Meta
  */
 async function sendInteractiveButtons({ sock, jid, title = '', body = '', footer = '', buttons = [], isMessageToSelf = false, imageUrl = null }) {
-    const myJid = cleanJid(sock.user?.id);
-    const target = isMessageToSelf ? (myJid || (jid && !jid.endsWith('@lid') ? jid : null)) : jid;
-    if (!target) return;
-
-    // Convert buttons to Native Flow button format
-    const nativeButtons = [];
-    for (const btn of (buttons || [])) {
-        if (btn.url) {
-            nativeButtons.push({
-                name: 'cta_url',
-                buttonParamsJson: JSON.stringify({
-                    display_text: btn.text || 'Open Link',
-                    url: btn.url,
-                    merchant_url: btn.url
-                })
-            });
-        } else {
-            nativeButtons.push({
-                name: 'quick_reply',
-                buttonParamsJson: JSON.stringify({
-                    display_text: btn.text || 'Action',
-                    id: btn.id || btn.text
-                })
-            });
-        }
-    }
-
-    if (nativeButtons.length > 0 && !imageUrl) {
-        try {
-            const interactiveMessage = proto.Message.InteractiveMessage.create({
-                body: proto.Message.InteractiveMessage.Body.create({
-                    text: body || ''
-                }),
-                footer: proto.Message.InteractiveMessage.Footer.create({
-                    text: footer || 'NERIST Campus Assistant'
-                }),
-                header: proto.Message.InteractiveMessage.Header.create({
-                    title: title || '',
-                    hasMediaAttachment: false
-                }),
-                nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                    buttons: nativeButtons
-                })
-            });
-
-            const msg = generateWAMessageFromContent(target, {
-                viewOnceMessage: {
-                    message: {
-                        messageContextInfo: {
-                            deviceListMetadata: {},
-                            deviceListMetadataVersion: 2
-                        },
-                        interactiveMessage
-                    }
-                }
-            }, { quoted: null });
-
-            if (msg?.key?.id) {
-                botSentIds.add(msg.key.id);
-                if (botSentIds.size > 500) {
-                    const first = botSentIds.values().next().value;
-                    botSentIds.delete(first);
-                }
-            }
-
-            await sock.relayMessage(target, msg.message, { messageId: msg.key.id });
-            return msg;
-        } catch (err) {
-            log(`Native interactive message relay failed: ${err.message}. Falling back to text.`);
-        }
-    }
-
-    // Fallback: format as clean text with quick actions
     let messageText = '';
     if (title) messageText += `*${title}*\n\n`;
     messageText += `${body}\n`;
 
     if (buttons && buttons.length > 0) {
-        messageText += `\n📋 *Quick Actions:*\n`;
+        messageText += `\n`;
         for (const btn of buttons) {
             if (btn.url) {
                 messageText += `🔗 *${btn.text}:*\n${btn.url}\n\n`;
             } else {
                 const shortcut = btn.id ? btn.id.replace('btn_admin_', '#').replace('btn_', '@') : btn.text;
-                messageText += `• \`${shortcut}\` : ${btn.text}\n`;
+                messageText += `╔═════════════════════════╗\n   ${btn.text}\n   👉 \`${shortcut}\`\n╚═════════════════════════╝\n`;
             }
         }
     }
@@ -502,7 +429,7 @@ async function sendInteractiveButtons({ sock, jid, title = '', body = '', footer
         messageText += `\n_${footer}_`;
     }
 
-    return await sendSmartReply(sock, target, false, messageText.trim(), imageUrl);
+    return await sendSmartReply(sock, jid, isMessageToSelf, messageText.trim(), imageUrl);
 }
 
 // Global runtime state
