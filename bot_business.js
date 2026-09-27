@@ -830,11 +830,10 @@ async function startBusinessBot() {
                         for (let i = 1; i < Math.min(3, matches.length); i++) {
                             const alt = matches[i];
                             const altClean = (alt.user_id || '').replace(/[^a-zA-Z0-9]/g, '_');
-                            const first = (alt.full_name || 'Student').trim().split(/\s+/)[0];
-                            const label = `👤 ${first} (${alt.user_id})`;
+                            const label = `👤 ${alt.full_name || 'Student'}`.trim();
                             actionButtons.push({
                                 id: `view_student_${altClean}`,
-                                text: label.slice(0, 24)
+                                text: label.length > 24 ? label.slice(0, 23) + '…' : label
                             });
                         }
 
