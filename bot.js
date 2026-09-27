@@ -61,7 +61,7 @@ function log(...args) {
     console.log(`[${timestamp}]`, ...args);
 }
 
-// 2. Load faculty database
+// 2. Load faculty & student databases
 let facultyList = [];
 try {
     const facultyPath = path.join(__dirname, 'faculty.json');
@@ -71,6 +71,17 @@ try {
     }
 } catch (err) {
     console.warn('Warning: Failed to load faculty.json:', err.message);
+}
+
+let studentsList = [];
+try {
+    const studentsPath = path.join(__dirname, 'students.json');
+    if (fs.existsSync(studentsPath)) {
+        studentsList = JSON.parse(fs.readFileSync(studentsPath, 'utf8'));
+        log(`Loaded ${studentsList.length} student records from students.json.`);
+    }
+} catch (err) {
+    console.warn('Warning: Failed to load students.json:', err.message);
 }
 
 /**
@@ -142,6 +153,47 @@ function searchFaculty(rawQuery) {
     // 4. Department match
     return facultyList.filter(f => {
         const dept = (f.department || '').toLowerCase();
+        return dept.includes(q);
+    });
+}
+
+/**
+ * Student Search by Name, Roll Number, or Department
+ */
+function searchStudents(rawQuery) {
+    if (!rawQuery || !rawQuery.trim()) return [];
+    const q = rawQuery.trim().toLowerCase();
+    const cleanQ = cleanHonorifics(rawQuery).toLowerCase();
+
+    // 1. Match by roll number / user_id (e.g. 121/108, 121_108, 121108)
+    const rollQuery = q.replace(/[^a-zA-Z0-9]/g, '');
+    const rollMatches = studentsList.filter(s => {
+        const roll = (s.user_id || '').toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+        return roll === rollQuery || (rollQuery.length >= 4 && roll.includes(rollQuery));
+    });
+    if (rollMatches.length > 0) return rollMatches;
+
+    // 2. Exact word / substring match on full_name
+    const nameMatches = studentsList.filter(s => {
+        const name = (s.full_name || '').toLowerCase();
+        const cleanName = cleanHonorifics(s.full_name || '').toLowerCase();
+        return name.includes(q) || cleanName.includes(cleanQ);
+    });
+    if (nameMatches.length > 0) return nameMatches;
+
+    // 3. Multi-word match (e.g. "Mutum Meirasana")
+    const words = cleanQ.split(' ').filter(Boolean);
+    if (words.length > 1) {
+        const multiMatches = studentsList.filter(s => {
+            const cleanName = cleanHonorifics(s.full_name || '').toLowerCase();
+            return words.every(w => cleanName.includes(w));
+        });
+        if (multiMatches.length > 0) return multiMatches;
+    }
+
+    // 4. Department / Degree match
+    return studentsList.filter(s => {
+        const dept = (s.department_name || s.degree_name || '').toLowerCase();
         return dept.includes(q);
     });
 }
@@ -719,7 +771,7 @@ Choose an option below:`,
             }
 
             // =====================================================================
-            // 👥 PUBLIC FACULTY SEARCH FOR STUDENTS (@find & @help)
+            // 👥 PUBLIC SEARCH FOR STUDENTS & FACULTY (@find, @student, @help)
             // =====================================================================
 
             // 1. Help or Menu button
@@ -728,20 +780,26 @@ Choose an option below:`,
                     sock,
                     jid: senderJid,
                     isMessageToSelf,
-                    title: 'NERIST Faculty Explorer 🎓',
+                    title: 'NERIST Directory Explorer 🎓',
                     body:
-`Welcome to the official NERIST Faculty Directory Assistant!
+`Welcome to the NERIST Campus Directory Assistant!
 
-*How to Search:*
-Send \`@find <name or shortcut>\` in chat.
-• \`@find akr\` (Shortcuts: Ashok Kumar Ray)
-• \`@find jb\` (Dr. Joyatri Bora Hazarika / JB ma'am)
-• \`@find Rajesh Kumar\` (Full/Partial name)
-• \`@find Physics\` (By department)`,
+👨‍🏫 *Faculty Search:*
+Send \`@find <name or shortcut>\`
+• \`@find akr\` (Ashok Kumar Ray)
+• \`@find jb\` (Dr. Joyatri Bora Hazarika)
+• \`@find Rajesh Kumar\` (By name)
+
+👨‍🎓 *Student Search:*
+Send \`@student <name or roll no>\`
+• \`@student meirasana\`
+• \`@student 121/108\``,
                     footer: 'nerist-faculty-search.pages.dev',
                     buttons: [
-                        { url: 'https://nerist-faculty-search.pages.dev/', text: '🌐 Open Web Explorer' },
-                        { id: '@find akr', text: '🔍 Search Example' }
+                        { url: 'https://nerist-student-search.pages.dev/', text: '🌐 Student Explorer' },
+                        { url: 'https://nerist-faculty-search.pages.dev/', text: '🌐 Faculty Explorer' },
+                        { id: '@student meirasana', text: '🔍 Student Example' },
+                        { id: '@find akr', text: '🔍 Faculty Example' }
                     ]
                 });
                 return;
@@ -749,11 +807,61 @@ Send \`@find <name or shortcut>\` in chat.
 
             // Search Again button clicked
             if (lowerBody === 'btn_search_again' || lowerBody === '@search' || lowerBody === 'search') {
-                await sendSmartReply(sock, senderJid, isMessageToSelf, 'Type `@find <name>` to search (e.g. `@find akr` or `@find Rajesh Kumar`).');
+                await sendSmartReply(sock, senderJid, isMessageToSelf, '• Search Faculty: `@find <name>` (e.g. `@find akr`)\n• Search Student: `@student <name or roll>` (e.g. `@student meirasana` or `@student 121/108`)');
                 return;
             }
 
-            // 2. Check for search query (@find, !find, find, or direct match in 1-on-1 chat)
+            // ---------------------------------------------------------------------
+            // 🎓 STUDENT SEARCH (@student <name or roll>)
+            // ---------------------------------------------------------------------
+            let studentQuery = '';
+            if (lowerBody.startsWith('@student')) {
+                studentQuery = rawBody.slice(8).trim();
+            } else if (lowerBody.startsWith('!student')) {
+                studentQuery = rawBody.slice(8).trim();
+            } else if (lowerBody.startsWith('student ')) {
+                studentQuery = rawBody.slice(8).trim();
+            }
+
+            if ((lowerBody === '@student' || lowerBody === '!student' || lowerBody === 'student') && !studentQuery) {
+                await sendSmartReply(sock, senderJid, isMessageToSelf, 'Please specify a student name or roll number.\n*Example:* `@student meirasana` or `@student 121/108`');
+                return;
+            }
+
+            if (studentQuery) {
+                searchCount++;
+                const sMatches = searchStudents(studentQuery);
+
+                if (sMatches.length > 0) {
+                    const top = sMatches[0];
+                    const rollNo = top.user_id || 'N/A';
+                    const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${rollNo.replace(/\//g, '_')}.jpg`;
+
+                    let replyBody = `🎓 *${top.full_name}*\n` +
+                                    `🆔 *Roll No:* \`${rollNo}\`\n` +
+                                    `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
+                                    `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
+                                    `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
+                                    (top.state ? `📍 *State:* ${top.state}\n` : '') +
+                                    `🖼️ *Photo:* ${photoUrl}`;
+
+                    if (sMatches.length > 1) {
+                        replyBody += `\n\n_Also found (${sMatches.length - 1} more):_\n` +
+                                     sMatches.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
+                    }
+
+                    await sendSmartReply(sock, senderJid, isMessageToSelf, replyBody.trim());
+                    log(`Answered @student "${studentQuery}" with ${sMatches.length} matches.`);
+                } else {
+                    await sendSmartReply(sock, senderJid, isMessageToSelf, 'No student found in NERIST database.');
+                    log(`Answered @student "${studentQuery}" with: No student found`);
+                }
+                return;
+            }
+
+            // ---------------------------------------------------------------------
+            // 👨‍🏫 FACULTY SEARCH (@find <name or shortcut>)
+            // ---------------------------------------------------------------------
             let query = '';
             if (lowerBody.startsWith('@find')) {
                 query = rawBody.slice(5).trim();
@@ -766,6 +874,31 @@ Send \`@find <name or shortcut>\` in chat.
                 const quickCheck = searchFaculty(rawBody);
                 if (quickCheck.length > 0) {
                     query = rawBody.trim();
+                } else {
+                    const studentCheck = searchStudents(rawBody);
+                    if (studentCheck.length > 0) {
+                        // Redirect to student search
+                        const top = studentCheck[0];
+                        const rollNo = top.user_id || 'N/A';
+                        const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${rollNo.replace(/\//g, '_')}.jpg`;
+
+                        let replyBody = `🎓 *${top.full_name}*\n` +
+                                        `🆔 *Roll No:* \`${rollNo}\`\n` +
+                                        `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
+                                        `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
+                                        `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
+                                        (top.state ? `📍 *State:* ${top.state}\n` : '') +
+                                        `🖼️ *Photo:* ${photoUrl}`;
+
+                        if (studentCheck.length > 1) {
+                            replyBody += `\n\n_Also found (${studentCheck.length - 1} more):_\n` +
+                                         studentCheck.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
+                        }
+
+                        await sendSmartReply(sock, senderJid, isMessageToSelf, replyBody.trim());
+                        log(`Auto-matched student "${rawBody}" with ${studentCheck.length} matches.`);
+                        return;
+                    }
                 }
             }
 
