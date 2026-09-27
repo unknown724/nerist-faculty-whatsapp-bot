@@ -120,73 +120,26 @@ async function sendMsg(sock, jid, text) {
 async function sendNativeButtons({ sock, jid, title = '', body = '', footer = '', buttons = [] }) {
     if (!jid || !body) return;
 
-    const nativeButtons = [];
-    for (const btn of (buttons || [])) {
-        if (btn.url) {
-            nativeButtons.push({
-                name: 'cta_url',
-                buttonParamsJson: JSON.stringify({
-                    display_text: btn.text || 'Open Link',
-                    url: btn.url,
-                    merchant_url: btn.url
-                })
-            });
-        } else {
-            nativeButtons.push({
-                name: 'quick_reply',
-                buttonParamsJson: JSON.stringify({
-                    display_text: btn.text || 'Action',
-                    id: btn.id || btn.text
-                })
-            });
-        }
-    }
+    let messageText = '';
+    if (title) messageText += `*${title}*\n\n`;
+    messageText += `${body}\n`;
 
-    try {
-        const interactiveMessage = proto.Message.InteractiveMessage.create({
-            body: proto.Message.InteractiveMessage.Body.create({
-                text: body
-            }),
-            footer: proto.Message.InteractiveMessage.Footer.create({
-                text: footer || 'NERIST Student Directory'
-            }),
-            header: proto.Message.InteractiveMessage.Header.create({
-                title: title || '',
-                hasMediaAttachment: false
-            }),
-            nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                buttons: nativeButtons
-            })
-        });
-
-        const msg = generateWAMessageFromContent(jid, {
-            viewOnceMessage: {
-                message: {
-                    messageContextInfo: {
-                        deviceListMetadata: {},
-                        deviceListMetadataVersion: 2
-                    },
-                    interactiveMessage
-                }
+    if (buttons && buttons.length > 0) {
+        messageText += `\n`;
+        for (const btn of buttons) {
+            if (btn.url) {
+                messageText += `🔗 *${btn.text}:*\n${btn.url}\n\n`;
+            } else {
+                const shortcut = btn.id ? btn.id.replace('btn_', '@') : btn.text;
+                messageText += `╔═════════════════════════╗\n   ${btn.text}\n   👉 \`${shortcut}\`\n╚═════════════════════════╝\n`;
             }
-        }, { quoted: null });
-
-        if (msg?.key?.id) {
-            botSentIds.add(msg.key.id);
         }
-
-        await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
-        return msg;
-    } catch (err) {
-        log(`Native button relay failed: ${err.message}. Sending fallback text.`);
-        let fallbackText = '';
-        if (title) fallbackText += `*${title}*\n\n`;
-        fallbackText += `${body}\n\n`;
-        for (const b of buttons) {
-            fallbackText += `• ${b.text}: \`${b.id || b.url}\`\n`;
-        }
-        return await sendMsg(sock, jid, fallbackText.trim());
     }
+    if (footer) {
+        messageText += `\n_${footer}_`;
+    }
+
+    return await sendMsg(sock, jid, messageText.trim());
 }
 
 async function startBusinessBot() {
@@ -280,6 +233,7 @@ async function startBusinessBot() {
 
             if (!rawBody) continue;
             const lowerBody = rawBody.toLowerCase();
+            log(`[BUSINESS MSG] fromMe=${msg.key.fromMe} jid=${senderJid} text="${rawBody}"`);
 
             // -----------------------------------------------------------------
             // 🎓 STUDENT SEARCH (@student <name or roll>)
@@ -289,6 +243,12 @@ async function startBusinessBot() {
                 studentQuery = rawBody.slice(8).trim();
             } else if (lowerBody.startsWith('student ')) {
                 studentQuery = rawBody.slice(8).trim();
+            } else if (!lowerBody.startsWith('@dossier') && !lowerBody.startsWith('!dossier') && !lowerBody.startsWith('dossier ')) {
+                // Auto-match student names or roll numbers in private chat
+                const check = searchStudents(rawBody);
+                if (check.length > 0) {
+                    studentQuery = rawBody.trim();
+                }
             }
 
             if (studentQuery) {
@@ -317,7 +277,7 @@ async function startBusinessBot() {
                             { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' }
                         ]
                     });
-                    log(`Processed @student "${studentQuery}" -> sent native quick reply button.`);
+                    log(`Processed @student "${studentQuery}" -> sent student card.`);
                 } else {
                     await sendMsg(sock, senderJid, 'No student found in NERIST database.');
                 }
