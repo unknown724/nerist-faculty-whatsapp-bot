@@ -782,10 +782,13 @@ async function startBusinessBot() {
             }
 
             // -----------------------------------------------------------------
-            // 🎓 STUDENT SEARCH (@student <name or roll>)
+            // 🎓 STUDENT SEARCH (@student <name or roll> or disambiguation tap)
             // -----------------------------------------------------------------
             let studentQuery = '';
-            if (buttonId === 'search_meira') {
+            if (buttonId && buttonId.startsWith('view_student_')) {
+                const altClean = buttonId.replace('view_student_', '');
+                studentQuery = studentCleanIdMap.get(altClean) || altClean.replace(/_/g, '/');
+            } else if (buttonId === 'search_meira') {
                 studentQuery = 'meira';
             } else if (lowerBody.startsWith('@student') || lowerBody.startsWith('!student')) {
                 studentQuery = rawBody.slice(8).trim();
@@ -815,24 +818,41 @@ async function startBusinessBot() {
                                     `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
                                     `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})`;
 
-                    if (matches.length > 1) {
-                        replyBody += `\n\n_Also found (${matches.length - 1} more):_\n` +
-                                     matches.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
-                    }
-
                     const cleanRollToken = rollNo.replace(/[^a-zA-Z0-9]/g, '_');
+
+                    // Primary Action: Unlock Top Candidate
+                    const actionButtons = [
+                        { id: `unlock_${cleanRollToken}`, text: '🔓 Unlock Dossier' }
+                    ];
+
+                    // Disambiguation Quick Reply Buttons: 1-Tap Alternate Matches (up to 2 buttons)
+                    if (matches.length > 1) {
+                        for (let i = 1; i < Math.min(3, matches.length); i++) {
+                            const alt = matches[i];
+                            const altClean = (alt.user_id || '').replace(/[^a-zA-Z0-9]/g, '_');
+                            const first = (alt.full_name || 'Student').trim().split(/\s+/)[0];
+                            const label = `👤 ${first} (${alt.user_id})`;
+                            actionButtons.push({
+                                id: `view_student_${altClean}`,
+                                text: label.slice(0, 24)
+                            });
+                        }
+
+                        if (matches.length > 3) {
+                            replyBody += `\n\n_Additional matches (${matches.length - 3} more):_\n` +
+                                         matches.slice(3, 7).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
+                        }
+                    }
 
                     await sendNativeButtons({
                         sock,
                         jid: senderJid,
                         title: 'NERIST Student Profile',
                         body: replyBody.trim(),
-                        footer: 'Confidential dossier is locked',
-                        buttons: [
-                            { id: `unlock_${cleanRollToken}`, text: '🔓 Unlock Dossier' }
-                        ]
+                        footer: matches.length > 1 ? `Found ${matches.length} matches · Tap to switch` : 'Confidential dossier is locked',
+                        buttons: actionButtons
                     });
-                    log(`Processed @student "${studentQuery}" -> sent student card.`);
+                    log(`Processed @student "${studentQuery}" -> sent student card with ${actionButtons.length} buttons.`);
                 } else {
                     await sendMsg(sock, senderJid, 'No student found in NERIST database.');
                 }
