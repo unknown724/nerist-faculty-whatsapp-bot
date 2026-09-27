@@ -40,7 +40,8 @@ function log(...args) {
 const QUOTA_FILE = path.join(__dirname, 'user_quotas.json');
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '9863013886').replace(/[^0-9]/g, '').slice(-10);
 const ADMIN_JID = `${process.env.ADMIN_PHONE || '9863013886'}@s.whatsapp.net`.replace(/^(\d{10})@/, '91$1@');
-const UPI_VPA = process.env.UPI_VPA || '9863013886@upi';
+const UPI_VPA = process.env.UPI_VPA || 'devanandawaheng725-2@oksbi';
+const UPI_PHONE = process.env.UPI_PHONE || '9863013886';
 const UPI_NAME = process.env.UPI_NAME || 'Devananda Wahengbam';
 const DAILY_FREE_LIMIT = 3;
 
@@ -527,10 +528,11 @@ async function startBusinessBot() {
                     `📌 *Plan:* ${planTitle}\n` +
                     `💰 *Amount:* *₹${amount}.00*\n` +
                     `📱 *UPI ID:* \`${UPI_VPA}\` _(Tap to copy)_\n` +
+                    `📞 *UPI Phone:* \`${UPI_PHONE}\` _(GPay / PhonePe / Paytm)_\n` +
                     `👤 *Recipient:* ${UPI_NAME}\n\n` +
                     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                     `🚀 *Instant Activation:*\n` +
-                    `1. Scan this QR or pay ₹${amount} via *GPay / PhonePe / Paytm / BHIM*\n` +
+                    `1. Scan this QR or pay ₹${amount} to UPI ID or Phone Number\n` +
                     `2. Copy the **12-digit UTR / UPI Ref No.** from payment receipt\n` +
                     `3. Send it here (e.g. \`429184910283\`) to unlock immediately!`;
 
