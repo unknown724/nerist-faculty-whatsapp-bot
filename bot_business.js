@@ -572,7 +572,126 @@ async function startBusinessBot() {
             }
 
             // -----------------------------------------------------------------
-            // 📝 12-DIGIT UTR / REFERENCE VERIFICATION
+            // 👑 ADMIN 1-TAP CLAIM APPROVAL / REJECTION HOOKS
+            // -----------------------------------------------------------------
+            if (userPhone === ADMIN_PHONE && buttonId && (buttonId.startsWith('claim_approve_') || buttonId.startsWith('claim_reject_'))) {
+                const isApprove = buttonId.startsWith('claim_approve_');
+                const claimId = isApprove ? buttonId.replace('claim_approve_', '') : buttonId.replace('claim_reject_', '');
+                const data = loadQuotas();
+                if (!data.pendingClaims) data.pendingClaims = {};
+
+                const claim = data.pendingClaims[claimId];
+                if (!claim) {
+                    await sendMsg(sock, senderJid, `⚠️ *Claim Not Found*: This approval request has already been processed or expired.`);
+                    continue;
+                }
+
+                if (isApprove) {
+                    const studentPhone = claim.userPhone;
+                    const today = new Date().toISOString().slice(0, 10);
+                    const userRec = data.quotas[studentPhone] || { lastDate: today, dailyUsed: 0, paidCredits: 0, passExpiresAt: null };
+
+                    if (!data.usedUtrs) data.usedUtrs = {};
+                    data.usedUtrs[claim.utr] = { phone: studentPhone, amount: claim.amount, type: claim.type, timestamp: Date.now() };
+
+                    if (claim.type === 'monthly' || claim.amount >= 119) {
+                        const expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+                        userRec.passExpiresAt = expiry;
+                        data.quotas[studentPhone] = userRec;
+                        delete data.pendingClaims[claimId];
+                        saveQuotas(data);
+
+                        await sendMsg(sock, claim.senderJid,
+                            `🎉 *MONTHLY PASS APPROVED!*\n` +
+                            `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                            `✅ Admin confirmed UTR: \`${claim.utr}\`\n` +
+                            `🌟 You now have **Unlimited Dossier Unlocks** for 30 days!\n` +
+                            `📅 Valid until: ${expiry.slice(0, 10)}`
+                        );
+                    } else {
+                        userRec.paidCredits = (userRec.paidCredits || 0) + 1;
+                        data.quotas[studentPhone] = userRec;
+                        delete data.pendingClaims[claimId];
+                        saveQuotas(data);
+
+                        await sendMsg(sock, claim.senderJid,
+                            `✅ *PAYMENT APPROVED!*\n` +
+                            `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                            `Admin confirmed UTR: \`${claim.utr}\` (₹${claim.amount})\n` +
+                            `🔓 1 Dossier Unlock Token added to your account!`
+                        );
+
+                        // If user was waiting for a specific dossier, auto-deliver it to them now!
+                        if (claim.targetRoll) {
+                            try {
+                                const targetRoll = claim.targetRoll;
+                                const matches = searchStudents(targetRoll);
+                                const top = matches.length > 0 ? matches[0] : null;
+                                const targetName = top ? top.full_name : 'Student';
+                                const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${targetRoll.replace(/\//g, '_')}.jpg`;
+
+                                await sendMsg(sock, claim.senderJid, `🔐 *Decrypting and delivering confidential record for ${targetName}...*`);
+                                const dossier = await fetchDossier(targetRoll);
+
+                                if (dossier) {
+                                    let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n` +
+                                                      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                                                      `👤 *Name:* ${targetName}\n` +
+                                                      `📋 *Reg. No:* \`${targetRoll}\`\n` +
+                                                      (dossier.rollNo ? `🆔 *Roll No:* \`${dossier.rollNo}\`\n` : '');
+
+                                    if (top) {
+                                        dossierText += `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
+                                                       `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
+                                                       `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
+                                                       (top.state ? `📍 *State:* ${top.state}\n` : '');
+                                    }
+
+                                    dossierText += `\n📋 *Personal Information:*\n`;
+                                    if (dossier.phone) dossierText += `📱 *Phone:* ${dossier.phone}\n`;
+                                    if (dossier.email) dossierText += `📧 *Email:* ${dossier.email}\n`;
+                                    if (dossier.dob) dossierText += `🎂 *DOB:* ${dossier.dob}\n`;
+                                    if (dossier.fatherName) dossierText += `👨 *Father:* ${dossier.fatherName}\n`;
+                                    if (dossier.motherName) dossierText += `👩 *Mother:* ${dossier.motherName}\n`;
+                                    if (dossier.parentsMobile) dossierText += `📞 *Parent Phone:* ${dossier.parentsMobile}\n`;
+                                    if (dossier.address) dossierText += `🏠 *Address/Pin:* ${dossier.address}\n`;
+                                    if (dossier.aadhaar) dossierText += `🪪 *Aadhaar:* \`${dossier.aadhaar}\`\n`;
+                                    dossierText += `\n_💳 Paid Credit Used (0 remaining)_`;
+
+                                    try {
+                                        await sock.sendMessage(claim.senderJid, {
+                                            image: { url: photoUrl },
+                                            caption: dossierText.trim()
+                                        });
+                                    } catch (e) {
+                                        await sendMsg(sock, claim.senderJid, dossierText.trim());
+                                    }
+                                }
+                            } catch (dErr) {
+                                log('Error delivering auto-approved dossier:', dErr.message);
+                            }
+                        }
+                    }
+
+                    await sendMsg(sock, senderJid, `✅ *Claim Approved*: Verified UTR \`${claim.utr}\` for +91${claim.userPhone}. Record unlocked.`);
+                } else {
+                    delete data.pendingClaims[claimId];
+                    saveQuotas(data);
+
+                    await sendMsg(sock, claim.senderJid,
+                        `❌ *VERIFICATION UNCONFIRMED*\n` +
+                        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                        `The administrator could not confirm transaction reference \`${claim.utr}\`.\n` +
+                        `If funds were deducted from your bank, please forward your payment receipt screenshot to the administrator at +91${ADMIN_PHONE}.`
+                    );
+
+                    await sendMsg(sock, senderJid, `❌ *Claim Rejected*: Disallowed UTR \`${claim.utr}\` for +91${claim.userPhone}.`);
+                }
+                continue;
+            }
+
+            // -----------------------------------------------------------------
+            // 📝 12-DIGIT UTR / REFERENCE SUBMISSION (OPTION B: 1-TAP ADMIN APPROVAL)
             // -----------------------------------------------------------------
             const utrMatch = rawBody.match(/\b\d{12}\b/);
             if (utrMatch && !rawBody.startsWith('@student') && !rawBody.startsWith('student ')) {
@@ -580,68 +699,69 @@ async function startBusinessBot() {
                 const data = loadQuotas();
 
                 if (data.usedUtrs && data.usedUtrs[utr]) {
-                    await sendMsg(sock, senderJid, `❌ *UTR Already Redeemed*\nThis 12-digit reference (\`${utr}\`) has already been claimed.`);
+                    await sendMsg(sock, senderJid, `❌ *UTR Already Claimed*\nThis 12-digit reference (\`${utr}\`) has already been redeemed.`);
                     continue;
                 }
 
-                const pending = userPendingPayment.get(userPhone) || { type: 'single', amount: 3 };
-                const today = new Date().toISOString().slice(0, 10);
-                const userRec = data.quotas[userPhone] || { lastDate: today, dailyUsed: 0, paidCredits: 0, passExpiresAt: null };
+                if (!data.pendingClaims) data.pendingClaims = {};
 
-                if (!data.usedUtrs) data.usedUtrs = {};
-
-                if (pending.type === 'monthly' || pending.amount >= 119) {
-                    // Activate 30-day monthly pass
-                    const expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-                    userRec.passExpiresAt = expiry;
-                    data.usedUtrs[utr] = { phone: userPhone, amount: 119, type: 'monthly', timestamp: Date.now() };
-                    data.quotas[userPhone] = userRec;
-                    saveQuotas(data);
-
-                    await sendMsg(sock, senderJid,
-                        `🎉 *MONTHLY PASS ACTIVATED!*\n` +
-                        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                        `✅ Verified UTR: \`${utr}\`\n` +
-                        `🌟 You now have **Unlimited Dossier Unlocks** for 30 days!\n` +
-                        `📅 Valid until: ${expiry.slice(0, 10)}`
-                    );
-
-                    // Notify Admin
-                    try {
-                        await sock.sendMessage(ADMIN_JID, {
-                            text: `🔔 *MONTHLY PASS ACTIVATED (₹119)*\n👤 User: +91${userPhone}\n📝 UTR: \`${utr}\`\n📅 Valid for 30 Days`
-                        });
-                    } catch (e) {}
-                    userPendingPayment.delete(userPhone);
+                // Check if already submitted and pending
+                const existing = Object.values(data.pendingClaims).find(c => c.utr === utr);
+                if (existing) {
+                    await sendMsg(sock, senderJid, `⏳ *Verification in Progress*\nReference \`${utr}\` is already awaiting admin approval.`);
                     continue;
-                } else {
-                    // Add 1 single unlock credit
-                    userRec.paidCredits = (userRec.paidCredits || 0) + 1;
-                    data.usedUtrs[utr] = { phone: userPhone, amount: 3, type: 'single', timestamp: Date.now() };
-                    data.quotas[userPhone] = userRec;
-                    saveQuotas(data);
-
-                    await sendMsg(sock, senderJid,
-                        `✅ *PAYMENT VERIFIED (₹3)*\n` +
-                        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                        `📝 UTR: \`${utr}\`\n` +
-                        `🔓 1 Dossier Unlock Credit added to your account!`
-                    );
-
-                    // Notify Admin
-                    try {
-                        await sock.sendMessage(ADMIN_JID, {
-                            text: `🔔 *PAYMENT RECEIVED (₹3)*\n👤 User: +91${userPhone}\n📝 UTR: \`${utr}\`\n🎓 Target: \`${pending.targetRoll || 'General'}\``
-                        });
-                    } catch (e) {}
-
-                    // Auto-unlock if user was in middle of unlocking a student!
-                    if (pending.targetRoll) {
-                        dossierQuery = pending.targetRoll;
-                    }
-                    userPendingPayment.delete(userPhone);
-                    if (!dossierQuery) continue;
                 }
+
+                const pending = userPendingPayment.get(userPhone) || { type: 'single', amount: 3, targetRoll: userLastStudent.get(senderJid) || '' };
+                const claimId = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+
+                data.pendingClaims[claimId] = {
+                    claimId,
+                    userPhone,
+                    senderJid,
+                    targetRoll: pending.targetRoll || '',
+                    amount: pending.amount || 3,
+                    type: pending.type || 'single',
+                    utr,
+                    timestamp: Date.now()
+                };
+                saveQuotas(data);
+
+                // 1. Notify Student: Clean confirmation that admin has received it
+                await sendMsg(sock, senderJid,
+                    `⏳ *PAYMENT REFERENCE SUBMITTED*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `📝 *UTR Reference:* \`${utr}\`\n` +
+                    `💰 *Amount:* ₹${pending.amount}.00\n` +
+                    `⏳ *Status:* Forwarded to server administrator (+91${ADMIN_PHONE}) for 1-tap verification.\n\n` +
+                    `⚡ Your record will be decrypted and delivered directly to this chat the moment it is confirmed!`
+                );
+
+                // 2. Dispatch 1-Tap Interactive Decision Card to Admin (+919863013886)
+                const planLabel = pending.type === 'monthly' ? 'Monthly Pass (₹119)' : `1 Unlock (₹3) for \`${pending.targetRoll || 'General'}\``;
+                const adminCardText =
+                    `🔔 *NEW PAYMENT APPROVAL REQUEST*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `💰 *Amount:* *₹${pending.amount}.00*\n` +
+                    `👤 *Student:* +91${userPhone}\n` +
+                    `📝 *UTR:* \`${utr}\`\n` +
+                    `📌 *Plan:* ${planLabel}\n\n` +
+                    `_Verify payment in your Google Pay / SBI app, then tap below:_`;
+
+                await sendNativeButtons({
+                    sock,
+                    jid: ADMIN_JID,
+                    title: 'Payment Approval Required',
+                    body: adminCardText,
+                    footer: 'PrintKurox Payment Gateway',
+                    buttons: [
+                        { id: `claim_approve_${claimId}`, text: '✅ Approve & Unlock' },
+                        { id: `claim_reject_${claimId}`, text: '❌ Reject Fake UTR' }
+                    ]
+                });
+
+                log(`Payment claim ${claimId} (UTR: ${utr}, ₹${pending.amount}) forwarded to admin for approval.`);
+                continue;
             }
 
             // -----------------------------------------------------------------
