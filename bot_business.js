@@ -136,74 +136,28 @@ async function sendNativeButtons({ sock, jid, title = '', body = '', footer = ''
     if (!jid || !body) return;
     const targetJid = resolveToPnJid(jid);
 
-    const nativeButtons = [];
-    for (const btn of (buttons || [])) {
-        if (btn.url) {
-            nativeButtons.push({
-                name: 'cta_url',
-                buttonParamsJson: JSON.stringify({
-                    display_text: btn.text || 'Open Link',
-                    url: btn.url,
-                    merchant_url: btn.url
-                })
-            });
-        } else {
-            nativeButtons.push({
-                name: 'quick_reply',
-                buttonParamsJson: JSON.stringify({
-                    display_text: btn.text || 'Action',
-                    id: btn.id || btn.text
-                })
-            });
-        }
-    }
+    let messageText = '';
+    if (title) messageText += `*${title}*\n\n`;
+    messageText += `${body}\n`;
 
-    try {
-        const interactiveMessage = proto.Message.InteractiveMessage.create({
-            body: proto.Message.InteractiveMessage.Body.create({
-                text: body
-            }),
-            footer: proto.Message.InteractiveMessage.Footer.create({
-                text: footer || 'NERIST Student Directory'
-            }),
-            header: proto.Message.InteractiveMessage.Header.create({
-                title: title || '',
-                hasMediaAttachment: false
-            }),
-            nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                buttons: nativeButtons
-            })
-        });
-
-        const msg = generateWAMessageFromContent(targetJid, {
-            viewOnceMessage: {
-                message: {
-                    messageContextInfo: {
-                        deviceListMetadata: {},
-                        deviceListMetadataVersion: 2
-                    },
-                    interactiveMessage
-                }
-            }
-        }, { quoted: null });
-
-        if (msg?.key?.id) {
-            botSentIds.add(msg.key.id);
-        }
-
-        await sock.relayMessage(targetJid, msg.message, { messageId: msg.key.id });
-        log(`Sent native interactive quick reply buttons to ${targetJid}`);
-        return msg;
-    } catch (err) {
-        log(`Native button relay error to ${targetJid}: ${err.message}. Sending fallback text.`);
-        let messageText = '';
-        if (title) messageText += `*${title}*\n\n`;
-        messageText += `${body}\n\n`;
+    if (buttons && buttons.length > 0) {
+        messageText += `\n`;
         for (const btn of buttons) {
-            messageText += `• ${btn.text}: \`${btn.id || btn.url}\`\n`;
+            if (btn.url) {
+                messageText += `🔗 *${btn.text}:*\n${btn.url}\n\n`;
+            } else {
+                const shortcut = btn.id ? btn.id.replace('btn_', '@') : btn.text;
+                messageText += `╔═════════════════════════╗\n   ${btn.text}\n   👉 \`${shortcut}\`\n╚═════════════════════════╝\n`;
+            }
         }
-        return await sendMsg(sock, targetJid, messageText.trim());
     }
+    if (footer) {
+        messageText += `\n_${footer}_`;
+    }
+
+    const sent = await sendMsg(sock, targetJid, messageText.trim());
+    log(`Delivered student card to ${targetJid}`);
+    return sent;
 }
 
 async function startBusinessBot() {
