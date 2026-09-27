@@ -375,30 +375,46 @@ function cleanJid(jid) {
 /**
  * Smart Reply Router:
  * Always sends to the owner's WhatsApp JID (e.g. 919863013886@s.whatsapp.net) for Message Yourself chats
+ * Supports optional direct image sending (photo + caption)
  */
-async function sendSmartReply(sock, senderJid, isMessageToSelf, text) {
-    if (!text) return;
+async function sendSmartReply(sock, senderJid, isMessageToSelf, text, imageUrl = null) {
+    if (!text && !imageUrl) return;
     const myJid = cleanJid(sock.user?.id);
-    if (isMessageToSelf) {
-        const target = myJid || (senderJid && !senderJid.endsWith('@lid') ? senderJid : null);
-        if (target) {
-            await sendMsg(sock, target, text);
+    const target = isMessageToSelf ? (myJid || (senderJid && !senderJid.endsWith('@lid') ? senderJid : null)) : senderJid;
+    if (!target) return;
+
+    if (imageUrl) {
+        try {
+            const sent = await sock.sendMessage(target, {
+                image: { url: imageUrl },
+                caption: String(text || '').trim()
+            });
+            if (sent?.key?.id) {
+                botSentIds.add(sent.key.id);
+                if (botSentIds.size > 500) {
+                    const first = botSentIds.values().next().value;
+                    botSentIds.delete(first);
+                }
+            }
+            return sent;
+        } catch (err) {
+            log(`Image send failed for ${imageUrl}: ${err.message}. Sending as text fallback.`);
         }
-    } else {
-        await sendMsg(sock, senderJid, text);
     }
+
+    return await sendMsg(sock, target, text);
 }
 
 /**
  * Formats Clean, Actionable Admin Menus with one-tap copyable WhatsApp command blocks
  */
-async function sendInteractiveButtons({ sock, jid, title, body, footer = '', buttons = [], isMessageToSelf = false }) {
+async function sendInteractiveButtons({ sock, jid, title, body, footer = '', buttons = [], isMessageToSelf = false, imageUrl = null }) {
     let messageText = '';
     if (title) messageText += `*${title}*\n\n`;
     messageText += `${body}\n`;
 
     if (buttons && buttons.length > 0) {
-        messageText += `\n📋 *Actions (Tap to copy):*\n`;
+        messageText += `\n📋 *Quick Actions:*\n`;
         for (const btn of buttons) {
             if (btn.url) {
                 messageText += `🔗 *${btn.text}:*\n${btn.url}\n\n`;
@@ -412,7 +428,7 @@ async function sendInteractiveButtons({ sock, jid, title, body, footer = '', but
         messageText += `\n_${footer}_`;
     }
 
-    return await sendSmartReply(sock, jid, isMessageToSelf, messageText.trim());
+    return await sendSmartReply(sock, jid, isMessageToSelf, messageText.trim(), imageUrl);
 }
 
 // Global runtime state
@@ -825,16 +841,14 @@ Send \`@student <name or roll no>\`
             }
 
             if ((lowerBody === '@student' || lowerBody === '!student' || lowerBody === 'student') && !studentQuery) {
+                if (isGroup) return; // Silently ignore in groups
                 await sendSmartReply(sock, senderJid, isMessageToSelf, 'Please specify a student name or roll number.\n*Example:* `@student meirasana` or `@student 121/108`');
                 return;
             }
 
             if (studentQuery) {
-                // Privacy Protection: Block student search in WhatsApp groups
-                if (isGroup) {
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, '🔒 *Privacy Notice:* Student search is disabled in group chats to protect privacy.\n\n👉 Please message the bot privately at https://wa.me/919863013886');
-                    return;
-                }
+                // Silently ignore in WhatsApp groups to protect student privacy
+                if (isGroup) return;
 
                 searchCount++;
                 const sMatches = searchStudents(studentQuery);
@@ -849,11 +863,10 @@ Send \`@student <name or roll no>\`
                                     `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
                                     `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
                                     `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
-                                    (top.state ? `📍 *State:* ${top.state}\n` : '') +
-                                    `🖼️ *Photo:* ${photoUrl}`;
+                                    (top.state ? `📍 *State:* ${top.state}\n` : '');
 
                     if (sMatches.length > 1) {
-                        replyBody += `\n\n_Also found (${sMatches.length - 1} more):_\n` +
+                        replyBody += `\n_Also found (${sMatches.length - 1} more):_\n` +
                                      sMatches.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
                     }
 
@@ -864,12 +877,12 @@ Send \`@student <name or roll no>\`
                         title: 'NERIST Student Profile',
                         body: replyBody.trim(),
                         footer: 'Confidential dossier is locked',
+                        imageUrl: photoUrl,
                         buttons: [
-                            { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' },
-                            { url: 'https://nerist-student-search.pages.dev/', text: '🌐 View on Web' }
+                            { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' }
                         ]
                     });
-                    log(`Answered @student "${studentQuery}" with ${sMatches.length} matches (public card only).`);
+                    log(`Answered @student "${studentQuery}" with photo and unlock button.`);
                 } else {
                     await sendSmartReply(sock, senderJid, isMessageToSelf, 'No student found in NERIST database.');
                     log(`Answered @student "${studentQuery}" with: No student found`);
@@ -890,23 +903,31 @@ Send \`@student <name or roll no>\`
             }
 
             if (dossierQuery) {
-                // Privacy Protection: Block dossier in groups
-                if (isGroup) {
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, '🔒 *Privacy Notice:* Dossier unlocking is strictly restricted to private 1-on-1 chat.\n\n👉 Message here: https://wa.me/919863013886');
-                    return;
-                }
+                // Silently ignore in groups
+                if (isGroup) return;
 
                 const sMatches = searchStudents(dossierQuery);
-                const targetRoll = sMatches.length > 0 ? sMatches[0].user_id : dossierQuery;
-                const targetName = sMatches.length > 0 ? sMatches[0].full_name : 'Student';
+                const top = sMatches.length > 0 ? sMatches[0] : null;
+                const targetRoll = top ? top.user_id : dossierQuery;
+                const targetName = top ? top.full_name : 'Student';
+                const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${targetRoll.replace(/\//g, '_')}.jpg`;
 
                 await sendSmartReply(sock, senderJid, isMessageToSelf, `🔐 Decrypting dossier for *${targetName}* (\`${targetRoll}\`)...`);
                 const dossier = await fetchDossier(targetRoll);
 
                 if (dossier) {
                     let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n` +
-                                      `👤 *${targetName}* (\`${targetRoll}\`)\n\n`;
+                                      `👤 *${targetName}*\n` +
+                                      `🆔 *Roll No:* \`${targetRoll}\`\n`;
 
+                    if (top) {
+                        dossierText += `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
+                                       `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
+                                       `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
+                                       (top.state ? `📍 *State:* ${top.state}\n` : '');
+                    }
+
+                    dossierText += `\n📋 *Personal Information:*\n`;
                     if (dossier.phone) dossierText += `📱 *Phone:* ${dossier.phone}\n`;
                     if (dossier.email) dossierText += `📧 *Email:* ${dossier.email}\n`;
                     if (dossier.dob) dossierText += `🎂 *DOB:* ${dossier.dob}\n`;
@@ -916,8 +937,8 @@ Send \`@student <name or roll no>\`
                     if (dossier.address) dossierText += `🏠 *Address/Pin:* ${dossier.address}\n`;
                     if (dossier.aadhaar) dossierText += `🪪 *Aadhaar:* \`${dossier.aadhaar}\`\n`;
 
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, dossierText.trim());
-                    log(`Unlocked dossier for ${targetRoll}`);
+                    await sendSmartReply(sock, senderJid, isMessageToSelf, dossierText.trim(), photoUrl);
+                    log(`Unlocked complete dossier with photo for ${targetRoll}`);
                 } else {
                     await sendSmartReply(sock, senderJid, isMessageToSelf, `❌ Unable to unlock dossier for \`${targetRoll}\`. Record not found in SymphonyX cache.`);
                 }
@@ -935,7 +956,7 @@ Send \`@student <name or roll no>\`
             } else if (lowerBody.startsWith('find ')) {
                 query = rawBody.slice(5).trim();
             } else if (!isGroup) {
-                // In private chat or Message Yourself, auto-match if valid faculty query
+                // In private chat or Message Yourself, auto-match if valid faculty or student query
                 const quickCheck = searchFaculty(rawBody);
                 if (quickCheck.length > 0) {
                     query = rawBody.trim();
@@ -952,11 +973,10 @@ Send \`@student <name or roll no>\`
                                         `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
                                         `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
                                         `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
-                                        (top.state ? `📍 *State:* ${top.state}\n` : '') +
-                                        `🖼️ *Photo:* ${photoUrl}`;
+                                        (top.state ? `📍 *State:* ${top.state}\n` : '');
 
                         if (studentCheck.length > 1) {
-                            replyBody += `\n\n_Also found (${studentCheck.length - 1} more):_\n` +
+                            replyBody += `\n_Also found (${studentCheck.length - 1} more):_\n` +
                                          studentCheck.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
                         }
 
@@ -967,12 +987,12 @@ Send \`@student <name or roll no>\`
                             title: 'NERIST Student Profile',
                             body: replyBody.trim(),
                             footer: 'Confidential dossier is locked',
+                            imageUrl: photoUrl,
                             buttons: [
-                                { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' },
-                                { url: 'https://nerist-student-search.pages.dev/', text: '🌐 View on Web' }
+                                { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' }
                             ]
                         });
-                        log(`Auto-matched student "${rawBody}" with ${studentCheck.length} matches.`);
+                        log(`Auto-matched student "${rawBody}" with photo.`);
                         return;
                     }
                 }
