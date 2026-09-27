@@ -798,9 +798,9 @@ Choose an option below:`,
                     sock,
                     jid: senderJid,
                     isMessageToSelf,
-                    title: 'NERIST Directory Explorer 🎓',
+                    title: 'NERIST Faculty Directory 👨‍🏫',
                     body:
-`Welcome to the NERIST Campus Directory Assistant!
+`Welcome to the NERIST Faculty Directory Assistant!
 
 👨‍🏫 *Faculty Search:*
 Send \`@find <name or shortcut>\`
@@ -808,16 +808,12 @@ Send \`@find <name or shortcut>\`
 • \`@find jb\` (Dr. Joyatri Bora Hazarika)
 • \`@find Rajesh Kumar\` (By name)
 
-👨‍🎓 *Student Search:*
-Send \`@student <name or roll no>\`
-• \`@student meirasana\`
-• \`@student 121/108\``,
+🎓 *Student Directory:*
+Please contact the Student Bot at: *+919362980761*`,
                     footer: 'nerist-faculty-search.pages.dev',
                     buttons: [
-                        { url: 'https://nerist-student-search.pages.dev/', text: '🌐 Student Explorer' },
-                        { url: 'https://nerist-faculty-search.pages.dev/', text: '🌐 Faculty Explorer' },
-                        { id: '@student meirasana', text: '🔍 Student Example' },
-                        { id: '@find akr', text: '🔍 Faculty Example' }
+                        { id: '@find akr', text: '🔍 Faculty Example (akr)' },
+                        { url: 'https://nerist-faculty-search.pages.dev/', text: '🌐 Faculty Explorer Web' }
                     ]
                 });
                 return;
@@ -825,120 +821,14 @@ Send \`@student <name or roll no>\`
 
             // Search Again button clicked
             if (lowerBody === 'btn_search_again' || lowerBody === '@search' || lowerBody === 'search') {
-                await sendSmartReply(sock, senderJid, isMessageToSelf, '• Search Faculty: `@find <name>` (e.g. `@find akr`)\n• Search Student: `@student <name or roll>` (e.g. `@student meirasana` or `@student 121/108`)');
+                await sendSmartReply(sock, senderJid, isMessageToSelf, '• Search Faculty: `@find <name>` (e.g. `@find akr`)\n• For Student Search, message: *+919362980761*');
                 return;
             }
 
-            // ---------------------------------------------------------------------
-            // 🎓 STUDENT SEARCH (@student <name or roll>)
-            // ---------------------------------------------------------------------
-            let studentQuery = '';
-            if (lowerBody.startsWith('@student')) {
-                studentQuery = rawBody.slice(8).trim();
-            } else if (lowerBody.startsWith('!student')) {
-                studentQuery = rawBody.slice(8).trim();
-            } else if (lowerBody.startsWith('student ')) {
-                studentQuery = rawBody.slice(8).trim();
-            }
-
-            if ((lowerBody === '@student' || lowerBody === '!student' || lowerBody === 'student') && !studentQuery) {
-                if (isGroup) return; // Silently ignore in groups
-                await sendSmartReply(sock, senderJid, isMessageToSelf, 'Please specify a student name or roll number.\n*Example:* `@student meirasana` or `@student 121/108`');
-                return;
-            }
-
-            if (studentQuery) {
-                // Silently ignore in WhatsApp groups to protect student privacy
+            // Redirect any @student attempts on personal number to the business number
+            if (lowerBody.startsWith('@student') || lowerBody.startsWith('!student') || lowerBody.startsWith('@dossier') || lowerBody.startsWith('!dossier')) {
                 if (isGroup) return;
-
-                searchCount++;
-                const sMatches = searchStudents(studentQuery);
-
-                if (sMatches.length > 0) {
-                    const top = sMatches[0];
-                    const rollNo = top.user_id || 'N/A';
-
-                    let replyBody = `🎓 *${top.full_name}*\n` +
-                                    `🆔 *Roll No:* \`${rollNo}\`\n` +
-                                    `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
-                                    `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})`;
-
-                    if (sMatches.length > 1) {
-                        replyBody += `\n\n_Also found (${sMatches.length - 1} more):_\n` +
-                                     sMatches.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
-                    }
-
-                    await sendInteractiveButtons({
-                        sock,
-                        jid: senderJid,
-                        isMessageToSelf,
-                        title: 'NERIST Student Profile',
-                        body: replyBody.trim(),
-                        footer: 'Confidential dossier is locked',
-                        buttons: [
-                            { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' }
-                        ]
-                    });
-                    log(`Answered @student "${studentQuery}" with quick reply button.`);
-                } else {
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, 'No student found in NERIST database.');
-                    log(`Answered @student "${studentQuery}" with: No student found`);
-                }
-                return;
-            }
-
-            // ---------------------------------------------------------------------
-            // 🔓 DOSSIER UNLOCK (@dossier <roll>)
-            // ---------------------------------------------------------------------
-            let dossierQuery = '';
-            if (lowerBody.startsWith('@dossier')) {
-                dossierQuery = rawBody.slice(8).trim();
-            } else if (lowerBody.startsWith('!dossier')) {
-                dossierQuery = rawBody.slice(8).trim();
-            } else if (lowerBody.startsWith('dossier ')) {
-                dossierQuery = rawBody.slice(8).trim();
-            }
-
-            if (dossierQuery) {
-                // Silently ignore in groups
-                if (isGroup) return;
-
-                const sMatches = searchStudents(dossierQuery);
-                const top = sMatches.length > 0 ? sMatches[0] : null;
-                const targetRoll = top ? top.user_id : dossierQuery;
-                const targetName = top ? top.full_name : 'Student';
-                const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${targetRoll.replace(/\//g, '_')}.jpg`;
-
-                await sendSmartReply(sock, senderJid, isMessageToSelf, `🔐 Decrypting dossier for *${targetName}* (\`${targetRoll}\`)...`);
-                const dossier = await fetchDossier(targetRoll);
-
-                if (dossier) {
-                    let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n\n` +
-                                      `👤 *${targetName}*\n` +
-                                      `🆔 *Roll No:* \`${targetRoll}\`\n`;
-
-                    if (top) {
-                        dossierText += `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
-                                       `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
-                                       `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
-                                       (top.state ? `📍 *State:* ${top.state}\n` : '');
-                    }
-
-                    dossierText += `\n📋 *Personal Information:*\n`;
-                    if (dossier.phone) dossierText += `📱 *Phone:* ${dossier.phone}\n`;
-                    if (dossier.email) dossierText += `📧 *Email:* ${dossier.email}\n`;
-                    if (dossier.dob) dossierText += `🎂 *DOB:* ${dossier.dob}\n`;
-                    if (dossier.fatherName) dossierText += `👨 *Father:* ${dossier.fatherName}\n`;
-                    if (dossier.motherName) dossierText += `👩 *Mother:* ${dossier.motherName}\n`;
-                    if (dossier.parentsMobile) dossierText += `📞 *Parent Phone:* ${dossier.parentsMobile}\n`;
-                    if (dossier.address) dossierText += `🏠 *Address/Pin:* ${dossier.address}\n`;
-                    if (dossier.aadhaar) dossierText += `🪪 *Aadhaar:* \`${dossier.aadhaar}\`\n`;
-
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, dossierText.trim(), photoUrl);
-                    log(`Unlocked complete dossier with photo for ${targetRoll}`);
-                } else {
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, `❌ Unable to unlock dossier for \`${targetRoll}\`. Record not found in SymphonyX cache.`);
-                }
+                await sendSmartReply(sock, senderJid, isMessageToSelf, '🎓 *Student Search has moved!* Please message our official bot at *+919362980761* for student profile and dossier lookups.');
                 return;
             }
 
@@ -953,41 +843,10 @@ Send \`@student <name or roll no>\`
             } else if (lowerBody.startsWith('find ')) {
                 query = rawBody.slice(5).trim();
             } else if (!isGroup) {
-                // In private chat or Message Yourself, auto-match if valid faculty or student query
+                // In private chat or Message Yourself, auto-match if valid faculty query
                 const quickCheck = searchFaculty(rawBody);
                 if (quickCheck.length > 0) {
                     query = rawBody.trim();
-                } else {
-                    const studentCheck = searchStudents(rawBody);
-                    if (studentCheck.length > 0) {
-                        // Redirect to student search
-                        const top = studentCheck[0];
-                        const rollNo = top.user_id || 'N/A';
-
-                        let replyBody = `🎓 *${top.full_name}*\n` +
-                                        `🆔 *Roll No:* \`${rollNo}\`\n` +
-                                        `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
-                                        `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})`;
-
-                        if (studentCheck.length > 1) {
-                            replyBody += `\n\n_Also found (${studentCheck.length - 1} more):_\n` +
-                                         studentCheck.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
-                        }
-
-                        await sendInteractiveButtons({
-                            sock,
-                            jid: senderJid,
-                            isMessageToSelf,
-                            title: 'NERIST Student Profile',
-                            body: replyBody.trim(),
-                            footer: 'Confidential dossier is locked',
-                            buttons: [
-                                { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' }
-                            ]
-                        });
-                        log(`Auto-matched student "${rawBody}" with quick reply button.`);
-                        return;
-                    }
                 }
             }
 

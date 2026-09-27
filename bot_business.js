@@ -299,7 +299,7 @@ async function startBusinessBot() {
                     const rollNo = top.user_id || 'N/A';
 
                     let replyBody = `🎓 *${top.full_name}*\n` +
-                                    `🆔 *Roll No:* \`${rollNo}\`\n` +
+                                    `📋 *Reg. No:* \`${rollNo}\`\n` +
                                     `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
                                     `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})`;
 
@@ -348,7 +348,8 @@ async function startBusinessBot() {
                 if (dossier) {
                     let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n\n` +
                                       `👤 *${targetName}*\n` +
-                                      `🆔 *Roll No:* \`${targetRoll}\`\n`;
+                                      `📋 *Reg. No:* \`${targetRoll}\`\n` +
+                                      (dossier.rollNo ? `🆔 *Roll No:* \`${dossier.rollNo}\`\n` : '');
 
                     if (top) {
                         dossierText += `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
