@@ -210,10 +210,6 @@ async function sendNativeButtons({ sock, jid, title = '', body = '', footer = 'N
                     },
                 ],
             },
-            {
-                tag: 'bot',
-                attrs: { biz_bot: '1' },
-            },
         ];
 
         await sock.relayMessage(targetJid, waMsg.message, {
@@ -231,6 +227,17 @@ async function sendNativeButtons({ sock, jid, title = '', body = '', footer = 'N
         const fallbackText = `${title ? '*' + title + '*\n\n' : ''}${body}\n\n` +
             buttons.map(b => b.url ? `🔗 ${b.text}: ${b.url}` : `👉 \`${b.id}\``).join('\n');
         return sendMsg(sock, targetJid, fallbackText.trim());
+    }
+}
+
+// Memory mapping for robust button callbacks
+const userLastStudent = new Map();
+const studentCleanIdMap = new Map();
+
+for (const s of studentsList) {
+    if (s.user_id) {
+        const cleanKey = s.user_id.replace(/[^a-zA-Z0-9]/g, '_');
+        studentCleanIdMap.set(cleanKey, s.user_id);
     }
 }
 
@@ -302,6 +309,8 @@ async function startBusinessBot() {
 
             // Detect Quick Reply Button Taps
             let buttonId = null;
+            let buttonText = null;
+
             const interactive =
                 content?.interactiveResponseMessage ||
                 msg.message?.interactiveResponseMessage ||
@@ -312,12 +321,32 @@ async function startBusinessBot() {
                 try {
                     const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
                     buttonId = params.id;
-                    log(`Button tapped: id="${buttonId}" by ${senderJid}`);
-                } catch (e) {}
+                    log(`Native flow button tapped: id="${buttonId}" by ${senderJid}`);
+                } catch (e) {
+                    log(`Failed to parse nativeFlowResponseMessage paramsJson: ${e.message}`);
+                }
+            }
+
+            if (!buttonId && (content?.templateButtonReplyMessage || msg.message?.templateButtonReplyMessage)) {
+                const t = content?.templateButtonReplyMessage || msg.message?.templateButtonReplyMessage;
+                buttonId = t.selectedId;
+                buttonText = t.selectedDisplayText;
+            }
+
+            if (!buttonId && (content?.buttonsResponseMessage || msg.message?.buttonsResponseMessage)) {
+                const b = content?.buttonsResponseMessage || msg.message?.buttonsResponseMessage;
+                buttonId = b.selectedButtonId;
+                buttonText = b.selectedDisplayText;
+            }
+
+            if (!buttonId && (content?.listResponseMessage || msg.message?.listResponseMessage)) {
+                const l = content?.listResponseMessage || msg.message?.listResponseMessage;
+                buttonId = l.singleSelectReply?.selectedRowId;
             }
 
             const rawBody = (
                 buttonId ||
+                buttonText ||
                 content?.conversation ||
                 content?.extendedTextMessage?.text ||
                 ''
@@ -325,7 +354,7 @@ async function startBusinessBot() {
 
             if (!rawBody) continue;
             const lowerBody = rawBody.toLowerCase();
-            log(`[BUSINESS MSG] fromMe=${msg.key.fromMe} jid=${senderJid} text="${rawBody}"`);
+            log(`[BUSINESS MSG] fromMe=${msg.key.fromMe} jid=${senderJid} text="${rawBody}" (buttonId=${buttonId})`);
 
             // -----------------------------------------------------------------
             // 👋 GREETINGS & MENU
@@ -335,10 +364,10 @@ async function startBusinessBot() {
                     sock,
                     jid: senderJid,
                     title: 'NERIST Student Directory',
-                    body: `👋 *Welcome to NERIST Student Assistant*\n\nSearch any student by name or registration number:\n• Example: \`@student meira\`\n• Example: \`@student 121/108\`\n\nTap the button below to try a search!`,
-                    footer: 'PrintKurox Student Bot',
+                    body: `👋 *Welcome to NERIST Student Assistant*\n\nSearch any student by name or registration number:\n• Example: \`@student meira\`\n• Example: \`@student 121/108\`\n\nTap the button below to test search!`,
+                    footer: 'NERIST Student Directory',
                     buttons: [
-                        { id: '@student meira', text: '🔍 Search Example' }
+                        { id: 'search_meira', text: '🔍 Search Meirasana' }
                     ]
                 });
                 continue;
@@ -348,11 +377,13 @@ async function startBusinessBot() {
             // 🎓 STUDENT SEARCH (@student <name or roll>)
             // -----------------------------------------------------------------
             let studentQuery = '';
-            if (lowerBody.startsWith('@student') || lowerBody.startsWith('!student')) {
+            if (buttonId === 'search_meira') {
+                studentQuery = 'meira';
+            } else if (lowerBody.startsWith('@student') || lowerBody.startsWith('!student')) {
                 studentQuery = rawBody.slice(8).trim();
             } else if (lowerBody.startsWith('student ')) {
                 studentQuery = rawBody.slice(8).trim();
-            } else if (!lowerBody.startsWith('@dossier') && !lowerBody.startsWith('!dossier') && !lowerBody.startsWith('dossier ') && !lowerBody.startsWith('dossier_')) {
+            } else if (!lowerBody.startsWith('@dossier') && !lowerBody.startsWith('!dossier') && !lowerBody.startsWith('dossier ') && !lowerBody.startsWith('dossier_') && !lowerBody.startsWith('unlock_') && !lowerBody.includes('unlock dossier')) {
                 // Auto-match student names or roll numbers in private chat
                 const check = searchStudents(rawBody);
                 if (check.length > 0) {
@@ -365,6 +396,11 @@ async function startBusinessBot() {
                 if (matches.length > 0) {
                     const top = matches[0];
                     const rollNo = top.user_id || 'N/A';
+                    const targetJid = resolveToPnJid(senderJid);
+
+                    // Track last viewed student for this user
+                    userLastStudent.set(senderJid, rollNo);
+                    userLastStudent.set(targetJid, rollNo);
 
                     let replyBody = `🎓 *${top.full_name}*\n` +
                                     `📋 *Reg. No:* \`${rollNo}\`\n` +
@@ -376,6 +412,8 @@ async function startBusinessBot() {
                                      matches.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
                     }
 
+                    const cleanRollToken = rollNo.replace(/[^a-zA-Z0-9]/g, '_');
+
                     await sendNativeButtons({
                         sock,
                         jid: senderJid,
@@ -383,7 +421,7 @@ async function startBusinessBot() {
                         body: replyBody.trim(),
                         footer: 'Confidential dossier is locked',
                         buttons: [
-                            { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' }
+                            { id: `unlock_${cleanRollToken}`, text: '🔓 Unlock Dossier' }
                         ]
                     });
                     log(`Processed @student "${studentQuery}" -> sent student card.`);
@@ -394,15 +432,21 @@ async function startBusinessBot() {
             }
 
             // -----------------------------------------------------------------
-            // 🔓 DOSSIER UNLOCK (@dossier <roll>)
+            // 🔓 DOSSIER UNLOCK (@dossier <roll> or button tap)
             // -----------------------------------------------------------------
             let dossierQuery = '';
-            if (lowerBody.startsWith('@dossier') || lowerBody.startsWith('!dossier')) {
+            if (buttonId && buttonId.startsWith('unlock_')) {
+                const cleanToken = buttonId.replace('unlock_', '');
+                dossierQuery = studentCleanIdMap.get(cleanToken) || cleanToken.replace(/_/g, '/');
+            } else if (lowerBody.startsWith('@dossier') || lowerBody.startsWith('!dossier')) {
                 dossierQuery = rawBody.slice(8).trim();
             } else if (lowerBody.startsWith('dossier_')) {
                 dossierQuery = rawBody.slice(8).trim();
             } else if (lowerBody.startsWith('dossier ')) {
                 dossierQuery = rawBody.slice(8).trim();
+            } else if (lowerBody.includes('unlock dossier') || lowerBody === 'unlock') {
+                const targetJid = resolveToPnJid(senderJid);
+                dossierQuery = userLastStudent.get(senderJid) || userLastStudent.get(targetJid) || '';
             }
 
             if (dossierQuery) {
@@ -412,12 +456,30 @@ async function startBusinessBot() {
                 const targetName = top ? top.full_name : 'Student';
                 const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${targetRoll.replace(/\//g, '_')}.jpg`;
 
-                await sendMsg(sock, senderJid, `🔐 Decrypting dossier for *${targetName}* (\`${targetRoll}\`)...`);
+                // 1. Instant Reaction Animation
+                sock.sendMessage(senderJid, { react: { text: '⏳', key: msg.key } }).catch(() => {});
+                sock.sendPresenceUpdate('composing', senderJid).catch(() => {});
+
+                // 2. Animated Progress Message
+                await sendMsg(
+                    sock,
+                    senderJid,
+                    `🔐 *DECRYPTING CONFIDENTIAL ARCHIVE...*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                    `👤 *Student:* ${targetName}\n` +
+                    `📋 *Reg. No:* \`${targetRoll}\`\n` +
+                    `⏳ _Accessing SymphonyX encrypted student cache..._`
+                );
+
                 const dossier = await fetchDossier(targetRoll);
 
+                // 3. Complete Reaction Animation
+                sock.sendMessage(senderJid, { react: { text: '🔓', key: msg.key } }).catch(() => {});
+
                 if (dossier) {
-                    let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n\n` +
-                                      `👤 *${targetName}*\n` +
+                    let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n` +
+                                      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                                      `👤 *Name:* ${targetName}\n` +
                                       `📋 *Reg. No:* \`${targetRoll}\`\n` +
                                       (dossier.rollNo ? `🆔 *Roll No:* \`${dossier.rollNo}\`\n` : '');
 
