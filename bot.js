@@ -830,6 +830,12 @@ Send \`@student <name or roll no>\`
             }
 
             if (studentQuery) {
+                // Privacy Protection: Block student search in WhatsApp groups
+                if (isGroup) {
+                    await sendSmartReply(sock, senderJid, isMessageToSelf, '🔒 *Privacy Notice:* Student search is disabled in group chats to protect privacy.\n\n👉 Please message the bot privately at https://wa.me/919863013886');
+                    return;
+                }
+
                 searchCount++;
                 const sMatches = searchStudents(studentQuery);
 
@@ -838,40 +844,82 @@ Send \`@student <name or roll no>\`
                     const rollNo = top.user_id || 'N/A';
                     const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${rollNo.replace(/\//g, '_')}.jpg`;
 
-                    // Attempt fetching unlocked dossier details (phone, email, parents, dob, etc.)
-                    const dossier = await fetchDossier(rollNo);
-
                     let replyBody = `🎓 *${top.full_name}*\n` +
                                     `🆔 *Roll No:* \`${rollNo}\`\n` +
                                     `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
                                     `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
                                     `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
-                                    (top.state ? `📍 *State:* ${top.state}\n` : '');
-
-                    if (dossier) {
-                        replyBody += `\n📋 *UNLOCKED DOSSIER:*\n`;
-                        if (dossier.phone) replyBody += `📱 *Phone:* ${dossier.phone}\n`;
-                        if (dossier.email) replyBody += `📧 *Email:* ${dossier.email}\n`;
-                        if (dossier.dob) replyBody += `🎂 *DOB:* ${dossier.dob}\n`;
-                        if (dossier.fatherName) replyBody += `👨 *Father:* ${dossier.fatherName}\n`;
-                        if (dossier.motherName) replyBody += `👩 *Mother:* ${dossier.motherName}\n`;
-                        if (dossier.parentsMobile) replyBody += `📞 *Parent Phone:* ${dossier.parentsMobile}\n`;
-                        if (dossier.address) replyBody += `🏠 *Pincode/Addr:* ${dossier.address}\n`;
-                        if (dossier.aadhaar) replyBody += `🪪 *Aadhaar:* \`${dossier.aadhaar}\`\n`;
-                    }
-
-                    replyBody += `\n🖼️ *Photo:* ${photoUrl}`;
+                                    (top.state ? `📍 *State:* ${top.state}\n` : '') +
+                                    `🖼️ *Photo:* ${photoUrl}`;
 
                     if (sMatches.length > 1) {
                         replyBody += `\n\n_Also found (${sMatches.length - 1} more):_\n` +
                                      sMatches.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
                     }
 
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, replyBody.trim());
-                    log(`Answered @student "${studentQuery}" with ${sMatches.length} matches (dossier: ${dossier ? 'yes' : 'no'}).`);
+                    await sendInteractiveButtons({
+                        sock,
+                        jid: senderJid,
+                        isMessageToSelf,
+                        title: 'NERIST Student Profile',
+                        body: replyBody.trim(),
+                        footer: 'Confidential dossier is locked',
+                        buttons: [
+                            { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' },
+                            { url: 'https://nerist-student-search.pages.dev/', text: '🌐 View on Web' }
+                        ]
+                    });
+                    log(`Answered @student "${studentQuery}" with ${sMatches.length} matches (public card only).`);
                 } else {
                     await sendSmartReply(sock, senderJid, isMessageToSelf, 'No student found in NERIST database.');
                     log(`Answered @student "${studentQuery}" with: No student found`);
+                }
+                return;
+            }
+
+            // ---------------------------------------------------------------------
+            // 🔓 DOSSIER UNLOCK (@dossier <roll>)
+            // ---------------------------------------------------------------------
+            let dossierQuery = '';
+            if (lowerBody.startsWith('@dossier')) {
+                dossierQuery = rawBody.slice(8).trim();
+            } else if (lowerBody.startsWith('!dossier')) {
+                dossierQuery = rawBody.slice(8).trim();
+            } else if (lowerBody.startsWith('dossier ')) {
+                dossierQuery = rawBody.slice(8).trim();
+            }
+
+            if (dossierQuery) {
+                // Privacy Protection: Block dossier in groups
+                if (isGroup) {
+                    await sendSmartReply(sock, senderJid, isMessageToSelf, '🔒 *Privacy Notice:* Dossier unlocking is strictly restricted to private 1-on-1 chat.\n\n👉 Message here: https://wa.me/919863013886');
+                    return;
+                }
+
+                const sMatches = searchStudents(dossierQuery);
+                const targetRoll = sMatches.length > 0 ? sMatches[0].user_id : dossierQuery;
+                const targetName = sMatches.length > 0 ? sMatches[0].full_name : 'Student';
+
+                await sendSmartReply(sock, senderJid, isMessageToSelf, `🔐 Decrypting dossier for *${targetName}* (\`${targetRoll}\`)...`);
+                const dossier = await fetchDossier(targetRoll);
+
+                if (dossier) {
+                    let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n` +
+                                      `👤 *${targetName}* (\`${targetRoll}\`)\n\n`;
+
+                    if (dossier.phone) dossierText += `📱 *Phone:* ${dossier.phone}\n`;
+                    if (dossier.email) dossierText += `📧 *Email:* ${dossier.email}\n`;
+                    if (dossier.dob) dossierText += `🎂 *DOB:* ${dossier.dob}\n`;
+                    if (dossier.fatherName) dossierText += `👨 *Father:* ${dossier.fatherName}\n`;
+                    if (dossier.motherName) dossierText += `👩 *Mother:* ${dossier.motherName}\n`;
+                    if (dossier.parentsMobile) dossierText += `📞 *Parent Phone:* ${dossier.parentsMobile}\n`;
+                    if (dossier.address) dossierText += `🏠 *Address/Pin:* ${dossier.address}\n`;
+                    if (dossier.aadhaar) dossierText += `🪪 *Aadhaar:* \`${dossier.aadhaar}\`\n`;
+
+                    await sendSmartReply(sock, senderJid, isMessageToSelf, dossierText.trim());
+                    log(`Unlocked dossier for ${targetRoll}`);
+                } else {
+                    await sendSmartReply(sock, senderJid, isMessageToSelf, `❌ Unable to unlock dossier for \`${targetRoll}\`. Record not found in SymphonyX cache.`);
                 }
                 return;
             }
@@ -912,7 +960,18 @@ Send \`@student <name or roll no>\`
                                          studentCheck.slice(1, 4).map(s => `• *${s.full_name}* (\`@student ${s.user_id}\`)`).join('\n');
                         }
 
-                        await sendSmartReply(sock, senderJid, isMessageToSelf, replyBody.trim());
+                        await sendInteractiveButtons({
+                            sock,
+                            jid: senderJid,
+                            isMessageToSelf,
+                            title: 'NERIST Student Profile',
+                            body: replyBody.trim(),
+                            footer: 'Confidential dossier is locked',
+                            buttons: [
+                                { id: `@dossier ${rollNo}`, text: '🔓 Unlock Dossier' },
+                                { url: 'https://nerist-student-search.pages.dev/', text: '🌐 View on Web' }
+                            ]
+                        });
                         log(`Auto-matched student "${rawBody}" with ${studentCheck.length} matches.`);
                         return;
                     }
