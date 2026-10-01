@@ -28,6 +28,7 @@ const QRCodeImage = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const { fetchDossier } = require('./dossier');
+const { initStudentIndex, getStudentByRoll, getStudentByPhone, regToDetailsMap, phoneToRegsMap } = require('./student_index');
 
 function log(...args) {
     const timestamp = new Date().toLocaleString();
@@ -141,6 +142,7 @@ try {
     if (fs.existsSync(studentsPath)) {
         studentsList = JSON.parse(fs.readFileSync(studentsPath, 'utf8'));
         log(`Loaded ${studentsList.length} student records from students.json.`);
+        initStudentIndex(studentsList);
     }
 } catch (err) {
     console.warn('Warning: Failed to load students.json:', err.message);
@@ -160,11 +162,16 @@ function searchStudents(rawQuery) {
     const q = rawQuery.trim().toLowerCase();
     const cleanQ = cleanHonorifics(rawQuery).toLowerCase();
 
-    // 1. Roll number / user_id match
+    // 1. Class Roll Number match (e.g. D/23/EC/015, D23EC015)
+    const rollMatch = getStudentByRoll(rawQuery);
+    if (rollMatch) return [rollMatch];
+
+    // 2. Roll number / user_id match
     const rollQuery = q.replace(/[^a-zA-Z0-9]/g, '');
     const rollMatches = studentsList.filter(s => {
         const roll = (s.user_id || '').toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
-        return roll === rollQuery || (rollQuery.length >= 4 && roll.includes(rollQuery));
+        const classRoll = (s.roll_no || '').toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+        return roll === rollQuery || classRoll === rollQuery || (rollQuery.length >= 4 && (roll.includes(rollQuery) || classRoll.includes(rollQuery)));
     });
     if (rollMatches.length > 0) return rollMatches;
 
@@ -193,7 +200,151 @@ function searchStudents(rawQuery) {
     });
 }
 
+// Helper: Aggregate all roll numbers across datasets (lateral entry, diploma + degree, PG, etc.)
+function getAllRollNumbersForStudent(targetReg, targetName, phone, initialRoll) {
+    const rolls = new Set();
+    if (initialRoll && typeof initialRoll === 'string' && initialRoll.trim() && initialRoll.trim() !== 'N/A') {
+        rolls.add(initialRoll.trim());
+    }
+    if (targetReg && regToDetailsMap && regToDetailsMap.has(targetReg)) {
+        const details = regToDetailsMap.get(targetReg);
+        if (details && details.rollNo && details.rollNo !== 'N/A') rolls.add(details.rollNo.trim());
+    }
+    if (targetReg && Array.isArray(studentsList)) {
+        const matchReg = studentsList.find(s => s.user_id === targetReg);
+        if (matchReg && matchReg.roll_no && matchReg.roll_no !== 'N/A') rolls.add(matchReg.roll_no.trim());
+    }
+    if (targetName && typeof targetName === 'string' && Array.isArray(studentsList)) {
+        const normTarget = targetName.trim().toLowerCase();
+        for (const s of studentsList) {
+            if (s.full_name && s.full_name.trim().toLowerCase() === normTarget) {
+                if (s.roll_no && s.roll_no !== 'N/A') rolls.add(s.roll_no.trim());
+                if (regToDetailsMap && regToDetailsMap.has(s.user_id)) {
+                    const details = regToDetailsMap.get(s.user_id);
+                    if (details && details.rollNo && details.rollNo !== 'N/A') rolls.add(details.rollNo.trim());
+                }
+            }
+        }
+    }
+    const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '').slice(-10) : '';
+    if (cleanPhone && cleanPhone.length === 10 && phoneToRegsMap) {
+        const matches = phoneToRegsMap.get(cleanPhone) || [];
+        for (const m of matches) {
+            if (regToDetailsMap && regToDetailsMap.has(m.regNo)) {
+                const details = regToDetailsMap.get(m.regNo);
+                if (details && details.rollNo && details.rollNo !== 'N/A') rolls.add(details.rollNo.trim());
+            }
+            if (Array.isArray(studentsList)) {
+                const s = studentsList.find(st => st.user_id === m.regNo);
+                if (s && s.roll_no && s.roll_no !== 'N/A') rolls.add(s.roll_no.trim());
+            }
+        }
+    }
+    return Array.from(rolls).filter(r => r && r !== 'N/A' && r.length > 2);
+}
+
+// Helper: Calculate/Resolve the correct current semester (fixes outdated semester slips)
+function resolveCorrectSemester(topRecord, dossier, regRecord) {
+    const romanMap = { 'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6, 'VII': 7, 'VIII': 8 };
+    let candidateSem = null;
+    if (topRecord && typeof topRecord.semester === 'number' && topRecord.semester > 0) {
+        candidateSem = topRecord.semester;
+    } else if (topRecord && topRecord.semester) {
+        const num = parseInt(topRecord.semester, 10);
+        if (!isNaN(num) && num > 0) candidateSem = num;
+    }
+
+    const semStr = regRecord?.semester || dossier?.semester || topRecord?.sem_string;
+    let slipSem = null;
+    if (semStr) {
+        const match = String(semStr).match(/^(I|II|III|IV|V|VI|VII|VIII)/i);
+        if (match) slipSem = romanMap[match[1].toUpperCase()];
+        else {
+            const mDigit = String(semStr).match(/(\d+)/);
+            if (mDigit) slipSem = parseInt(mDigit[1], 10);
+        }
+    }
+
+    const sessStr = regRecord?.session || dossier?.session || '';
+    const sessMatch = String(sessStr).match(/(\d{4})-(\d{4})\s*(Jul|Jan)/i);
+    if (slipSem && sessMatch) {
+        const slipYear = parseInt(sessMatch[1], 10);
+        const slipSeason = sessMatch[3].toLowerCase();
+        const now = new Date();
+        const currentYear = now.getFullYear();
+        const currentMonth = now.getMonth();
+        const currentSeason = currentMonth >= 6 ? 'jul' : 'jan';
+        let diffSems = (currentYear - slipYear) * 2;
+        if (slipSeason === 'jan' && currentSeason === 'jul') diffSems += 1;
+        else if (slipSeason === 'jul' && currentSeason === 'jan') diffSems -= 1;
+        const projectedSem = slipSem + diffSems;
+        if (projectedSem > (candidateSem || 0)) {
+            candidateSem = projectedSem;
+        }
+    }
+
+    const prog = ((topRecord && topRecord.program_name) || '').toLowerCase();
+    let maxSem = 8;
+    if (prog.includes('m.tech') || prog.includes('m.sc') || prog.includes('mba') || prog.includes('master')) maxSem = 4;
+    else if (prog.includes('diploma')) maxSem = 6;
+    else if (prog.includes('phd')) maxSem = 10;
+
+    if (candidateSem && candidateSem > maxSem) {
+        candidateSem = maxSem;
+    }
+
+    return candidateSem || (slipSem ? Math.min(slipSem, maxSem) : (topRecord?.semester || 'N/A'));
+}
+
 const botSentIds = new Set();
+const SHOW_DOSSIER_PHOTO = process.env.SHOW_DOSSIER_PHOTO !== 'false';
+
+/**
+ * Robustly fetches and validates the student's authentic photo buffer from SymphonyX CDN.
+ * Handles both registration numbers (e.g. 121/108) and roll numbers (e.g. D/23/EC/015),
+ * filters out 5-byte "false" responses, and validates JPEG magic bytes.
+ */
+async function fetchStudentPhotoBuffer(targetRoll) {
+    if (!targetRoll || !SHOW_DOSSIER_PHOTO) return null;
+    const cleanRoll = targetRoll.trim();
+
+    const candidates = [
+        cleanRoll.replace(/\//g, '_'),
+        cleanRoll.replace(/[^a-zA-Z0-9]/g, '_')
+    ];
+
+    if (regToDetailsMap) {
+        for (const [reg, details] of regToDetailsMap.entries()) {
+            if (details.rollNo && details.rollNo.toLowerCase() === cleanRoll.toLowerCase()) {
+                candidates.unshift(reg.replace(/\//g, '_'));
+                break;
+            }
+        }
+    }
+
+    for (const token of candidates) {
+        const url = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${token}.jpg`;
+        try {
+            const res = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+                },
+                signal: AbortSignal.timeout(4000)
+            });
+            if (res.ok) {
+                const cType = res.headers.get('content-type') || '';
+                if (cType.includes('image')) {
+                    const buf = Buffer.from(await res.arrayBuffer());
+                    if (buf.length > 500 && buf[0] === 0xff && buf[1] === 0xd8) {
+                        return buf;
+                    }
+                }
+            }
+        } catch (e) {}
+    }
+    return null;
+}
 
 function cleanJid(jid) {
     if (!jid) return '';
@@ -352,7 +503,10 @@ async function startBusinessBot() {
         printQRInTerminal: false,
         browser: Browsers.windows('Desktop'),
         syncFullHistory: false,
-        generateHighQualityLinkPreview: false
+        generateHighQualityLinkPreview: false,
+        keepAliveIntervalMs: 20000,
+        defaultQueryTimeoutMs: 60000,
+        connectTimeoutMs: 60000
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -442,19 +596,88 @@ async function startBusinessBot() {
                 buttonId = l.singleSelectReply?.selectedRowId;
             }
 
+            // Check for media attachments (PDF, documents, images)
+            const documentMsg =
+                content?.documentMessage ||
+                content?.documentWithCaptionMessage?.message?.documentMessage ||
+                msg.message?.documentMessage ||
+                msg.message?.documentWithCaptionMessage?.message?.documentMessage;
+            const imageMsg =
+                content?.imageMessage ||
+                content?.viewOnceMessage?.message?.imageMessage ||
+                msg.message?.imageMessage;
+            const isMediaAttachment = !!(documentMsg || imageMsg);
+
             const rawBody = (
                 buttonId ||
                 buttonText ||
                 content?.conversation ||
                 content?.extendedTextMessage?.text ||
+                documentMsg?.caption ||
+                imageMsg?.caption ||
                 ''
             ).trim();
 
-            if (!rawBody) continue;
+            if (!rawBody && !isMediaAttachment) continue;
             const lowerBody = rawBody.toLowerCase();
             const targetPnJid = resolveToPnJid(senderJid);
             const userPhone = targetPnJid.split('@')[0].replace(/[^0-9]/g, '').slice(-10);
-            log(`[BUSINESS MSG] fromMe=${msg.key.fromMe} jid=${senderJid} phone=${userPhone} text="${rawBody}" (buttonId=${buttonId})`);
+            log(`[BUSINESS MSG] fromMe=${msg.key.fromMe} jid=${senderJid} phone=${userPhone} text="${rawBody}" (media=${isMediaAttachment}, buttonId=${buttonId})`);
+
+            // If a document or photo is sent without a student command, acknowledge preparation immediately
+            if (isMediaAttachment && !msg.key.fromMe && !lowerBody.startsWith('@student') && !lowerBody.startsWith('@phone')) {
+                const rawMime = (documentMsg?.mimetype || imageMsg?.mimetype || '').toLowerCase();
+                const rawDocName = documentMsg?.fileName || '';
+                const lowerDocName = rawDocName.toLowerCase();
+                const isPdfFile = lowerDocName.endsWith('.pdf') || rawMime.includes('pdf');
+                const isPhotoFile = !isPdfFile && (!!imageMsg || rawMime.startsWith('image/') || /\.(jpe?g|png|webp|heic|bmp|tiff)$/i.test(lowerDocName));
+
+                let prepNotice = '⏳ *Your document is preparing...*\nPlease wait a moment.';
+                if (isPdfFile) {
+                    prepNotice = rawDocName
+                        ? `⏳ *Your PDF is preparing...*\n📄 _${rawDocName}_\nPlease wait a moment.`
+                        : `⏳ *Your PDF is preparing...*\nPlease wait a moment.`;
+                } else if (isPhotoFile) {
+                    prepNotice = `⏳ *Your photo is preparing...*\nPlease wait a moment.`;
+                }
+
+                await sendMsg(sock, senderJid, prepNotice);
+                continue;
+            }
+
+            // -----------------------------------------------------------------
+            // 📱 ADMIN PHONE NUMBER LOOKUP (@phone <num>)
+            // -----------------------------------------------------------------
+            if (lowerBody.startsWith('@phone') || lowerBody.startsWith('!phone') || lowerBody.startsWith('#phone')) {
+                if (userPhone !== ADMIN_PHONE) {
+                    await sendMsg(sock, senderJid, '⛔ *Access Denied:* Phone lookup is restricted to administrators only.');
+                    continue;
+                }
+                const phoneQuery = rawBody.replace(/^[@!#]phone/i, '').trim();
+                if (!phoneQuery) {
+                    await sendMsg(sock, senderJid, '📱 *Usage:* `@phone <10-digit number>`\nExample: `@phone 7628811494`');
+                    continue;
+                }
+                const matches = getStudentByPhone(phoneQuery);
+                if (!matches || matches.length === 0) {
+                    await sendMsg(sock, senderJid, `❌ No student record found matching phone: \`${phoneQuery}\``);
+                    continue;
+                }
+                let reply = `🔍 *Phone Lookup Result (${matches.length} found):*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+                for (const m of matches) {
+                    reply += `👤 *${m.full_name}*\n` +
+                             `📋 *Reg No:* \`${m.user_id}\`\n` +
+                             (m.rollNo ? `🆔 *Roll No:* \`${m.rollNo}\`\n` : '') +
+                             `🏛️ *Dept:* ${m.department_name || m.degree_name || 'NERIST'}\n` +
+                             `📚 *Program:* ${m.program_name || 'Degree'} (Sem ${m.semester || 'N/A'})\n` +
+                             (m.fatherName ? `👨 *Father:* ${m.fatherName}\n` : '') +
+                             (m.motherName ? `👩 *Mother:* ${m.motherName}\n` : '') +
+                             `📱 *Matched:* ${m.matchedPhone} (${m.matchType})\n` +
+                             `━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+                }
+                await sendMsg(sock, senderJid, reply.trim());
+                continue;
+            }
 
             // -----------------------------------------------------------------
             // 👑 ADMIN DIRECT MANAGEMENT HOOKS (Devananda only)
@@ -628,43 +851,82 @@ async function startBusinessBot() {
                                 const matches = searchStudents(targetRoll);
                                 const top = matches.length > 0 ? matches[0] : null;
                                 const targetName = top ? top.full_name : 'Student';
-                                const photoUrl = `https://saascdn.symphonyx.in/fetch/9/1/3/STUDENT_IMAGES/${targetRoll.replace(/\//g, '_')}.jpg`;
+                                const destJid = (claim.senderJid && !claim.senderJid.endsWith('@lid'))
+                                    ? claim.senderJid
+                                    : (claim.userPhone ? `${claim.userPhone}@s.whatsapp.net` : resolveToPnJid(claim.senderJid));
 
-                                await sendMsg(sock, claim.senderJid, `🔐 *Decrypting and delivering confidential record for ${targetName}...*`);
+                                await sendMsg(sock, destJid, `🔐 *Decrypting and delivering confidential record for ${targetName}...*`);
                                 const dossier = await fetchDossier(targetRoll);
+                                const regRec = regToDetailsMap.get(targetRoll);
 
-                                if (dossier) {
+                                let effDossier = dossier;
+                                if (!effDossier && regRec) {
+                                    effDossier = {
+                                        rollNo: regRec.rollNo,
+                                        phone: regRec.mobile,
+                                        parentsMobile: regRec.parentMobile,
+                                        fatherName: regRec.fatherName,
+                                        motherName: regRec.motherName,
+                                        dob: regRec.dob,
+                                        email: regRec.email,
+                                        aadhaar: regRec.aadhaar,
+                                        semester: regRec.semester,
+                                        session: regRec.session
+                                    };
+                                }
+
+                                if (effDossier || top) {
+                                    effDossier = effDossier || {};
+                                    const allRolls = getAllRollNumbersForStudent(
+                                        targetRoll,
+                                        targetName,
+                                        effDossier.phone || effDossier.parentsMobile || regRec?.mobile,
+                                        effDossier.rollNo || regRec?.rollNo
+                                    );
+
+                                    const currentSem = resolveCorrectSemester(top, effDossier, regRec);
+
                                     let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n` +
                                                       `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                                                       `👤 *Name:* ${targetName}\n` +
-                                                      `📋 *Reg. No:* \`${targetRoll}\`\n` +
-                                                      (dossier.rollNo ? `🆔 *Roll No:* \`${dossier.rollNo}\`\n` : '');
+                                                      `📋 *Reg. No:* \`${targetRoll}\`\n`;
+
+                                    if (allRolls.length > 1) {
+                                        dossierText += `🔢 *Roll Nos:* ${allRolls.map(r => `\`${r}\``).join(' · ')}\n`;
+                                    } else if (allRolls.length === 1) {
+                                        dossierText += `🔢 *Roll No:* \`${allRolls[0]}\`\n`;
+                                    }
 
                                     if (top) {
                                         dossierText += `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
-                                                       `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
+                                                       `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${currentSem})\n` +
                                                        `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
                                                        (top.state ? `📍 *State:* ${top.state}\n` : '');
                                     }
 
                                     dossierText += `\n📋 *Personal Information:*\n`;
-                                    if (dossier.phone) dossierText += `📱 *Phone:* ${dossier.phone}\n`;
-                                    if (dossier.email) dossierText += `📧 *Email:* ${dossier.email}\n`;
-                                    if (dossier.dob) dossierText += `🎂 *DOB:* ${dossier.dob}\n`;
-                                    if (dossier.fatherName) dossierText += `👨 *Father:* ${dossier.fatherName}\n`;
-                                    if (dossier.motherName) dossierText += `👩 *Mother:* ${dossier.motherName}\n`;
-                                    if (dossier.parentsMobile) dossierText += `📞 *Parent Phone:* ${dossier.parentsMobile}\n`;
-                                    if (dossier.address) dossierText += `🏠 *Address/Pin:* ${dossier.address}\n`;
-                                    if (dossier.aadhaar) dossierText += `🪪 *Aadhaar:* \`${dossier.aadhaar}\`\n`;
+                                    if (effDossier.phone) dossierText += `📱 *Phone:* ${effDossier.phone}\n`;
+                                    if (effDossier.email) dossierText += `📧 *Email:* ${effDossier.email}\n`;
+                                    if (effDossier.dob) dossierText += `🎂 *DOB:* ${effDossier.dob}\n`;
+                                    if (effDossier.fatherName) dossierText += `👨 *Father:* ${effDossier.fatherName}\n`;
+                                    if (effDossier.motherName) dossierText += `👩 *Mother:* ${effDossier.motherName}\n`;
+                                    if (effDossier.parentsMobile) dossierText += `📞 *Parent Phone:* ${effDossier.parentsMobile}\n`;
+                                    if (effDossier.address) dossierText += `🏠 *Address/Pin:* ${effDossier.address}\n`;
+                                    if (effDossier.aadhaar) dossierText += `🪪 *Aadhaar:* \`${effDossier.aadhaar}\`\n`;
                                     dossierText += `\n_💳 Paid Credit Used (0 remaining)_`;
 
-                                    try {
-                                        await sock.sendMessage(claim.senderJid, {
-                                            image: { url: photoUrl },
-                                            caption: dossierText.trim()
-                                        });
-                                    } catch (e) {
-                                        await sendMsg(sock, claim.senderJid, dossierText.trim());
+                                    const photoBuf = await fetchStudentPhotoBuffer(targetRoll);
+                                    if (photoBuf) {
+                                        try {
+                                            await sock.sendMessage(destJid, {
+                                                image: photoBuf,
+                                                caption: dossierText.trim()
+                                            });
+                                        } catch (sendImgErr) {
+                                            await sendMsg(sock, destJid, dossierText.trim());
+                                        }
+                                    } else {
+                                        await sendMsg(sock, destJid, dossierText.trim());
                                     }
                                 }
                             } catch (dErr) {
@@ -694,7 +956,7 @@ async function startBusinessBot() {
             // 📝 12-DIGIT UTR / REFERENCE SUBMISSION (OPTION B: 1-TAP ADMIN APPROVAL)
             // -----------------------------------------------------------------
             const utrMatch = rawBody.match(/\b\d{12}\b/);
-            if (utrMatch && !rawBody.startsWith('@student') && !rawBody.startsWith('student ')) {
+            if (utrMatch && !lowerBody.startsWith('@') && !lowerBody.startsWith('#') && !lowerBody.startsWith('!') && !rawBody.startsWith('+91')) {
                 const utr = utrMatch[0];
                 const data = loadQuotas();
 
@@ -765,41 +1027,16 @@ async function startBusinessBot() {
             }
 
             // -----------------------------------------------------------------
-            // 👋 GREETINGS & MENU
-            // -----------------------------------------------------------------
-            if (['hi', 'hello', 'hey', 'start', 'help', 'menu'].includes(lowerBody)) {
-                await sendNativeButtons({
-                    sock,
-                    jid: senderJid,
-                    title: 'NERIST Student Directory',
-                    body: `👋 *Welcome to NERIST Student Assistant*\n\nSearch any student by name or registration number:\n• Example: \`@student meira\`\n• Example: \`@student 121/108\`\n\nTap the button below to test search!`,
-                    footer: 'NERIST Student Directory',
-                    buttons: [
-                        { id: 'search_meira', text: '🔍 Search Meirasana' }
-                    ]
-                });
-                continue;
-            }
-
-            // -----------------------------------------------------------------
             // 🎓 STUDENT SEARCH (@student <name or roll> or disambiguation tap)
             // -----------------------------------------------------------------
             let studentQuery = '';
             if (buttonId && buttonId.startsWith('view_student_')) {
                 const altClean = buttonId.replace('view_student_', '');
                 studentQuery = studentCleanIdMap.get(altClean) || altClean.replace(/_/g, '/');
-            } else if (buttonId === 'search_meira') {
-                studentQuery = 'meira';
             } else if (lowerBody.startsWith('@student') || lowerBody.startsWith('!student')) {
                 studentQuery = rawBody.slice(8).trim();
             } else if (lowerBody.startsWith('student ')) {
                 studentQuery = rawBody.slice(8).trim();
-            } else if (!lowerBody.startsWith('@dossier') && !lowerBody.startsWith('!dossier') && !lowerBody.startsWith('dossier ') && !lowerBody.startsWith('dossier_') && !lowerBody.startsWith('unlock_') && !lowerBody.includes('unlock dossier')) {
-                // Auto-match student names or roll numbers in private chat
-                const check = searchStudents(rawBody);
-                if (check.length > 0) {
-                    studentQuery = rawBody.trim();
-                }
             }
 
             if (studentQuery) {
@@ -813,10 +1050,13 @@ async function startBusinessBot() {
                     userLastStudent.set(senderJid, rollNo);
                     userLastStudent.set(targetJid, rollNo);
 
-                    let replyBody = `🎓 *${top.full_name}*\n` +
+                    let replyBody = `👤 *Name:* ${top.full_name}\n` +
                                     `📋 *Reg. No:* \`${rollNo}\`\n` +
+                                    (top.roll_no ? `🔢 *Class Roll:* \`${top.roll_no}\`\n` : '') +
                                     `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
-                                    `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})`;
+                                    (top.status === 'Alumni / Left'
+                                        ? `🎓 *Status:* Alumni / Ex-Student`
+                                        : `🎓 *Semester:* Semester ${top.semester} (Odd Sem)`);
 
                     const cleanRollToken = rollNo.replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -938,29 +1178,65 @@ async function startBusinessBot() {
                 // 3. Complete Reaction Animation
                 sock.sendMessage(senderJid, { react: { text: '🔓', key: msg.key } }).catch(() => {});
 
-                if (dossier) {
+                const regRec = regToDetailsMap.get(targetRoll);
+                let effDossier = {
+                    ...(regRec || {}),
+                    ...(dossier || {})
+                };
+                if (top) {
+                    if (!effDossier.rollNo && top.roll_no) effDossier.rollNo = top.roll_no;
+                    if (!effDossier.phone && top.mobile) effDossier.phone = top.mobile;
+                    if (!effDossier.email && top.email) effDossier.email = top.email;
+                    if (!effDossier.semester && top.semester) effDossier.semester = top.semester;
+                    if (!effDossier.address && top.pincode) effDossier.address = `PIN: ${top.pincode}`;
+                }
+                if (regRec) {
+                    if (!effDossier.rollNo && (regRec.rollNo || regRec.roll_no)) effDossier.rollNo = regRec.rollNo || regRec.roll_no;
+                    if (!effDossier.phone && (regRec.mobile || regRec.phone)) effDossier.phone = regRec.mobile || regRec.phone;
+                    if (!effDossier.email && regRec.email) effDossier.email = regRec.email;
+                    if (!effDossier.parentsMobile && (regRec.parentMobile || regRec.parentsMobile)) effDossier.parentsMobile = regRec.parentMobile || regRec.parentsMobile;
+                }
+
+                if (effDossier || top) {
+                    effDossier = effDossier || {};
+                    const allRolls = getAllRollNumbersForStudent(
+                        targetRoll,
+                        targetName,
+                        effDossier.phone || effDossier.parentsMobile || regRec?.mobile,
+                        effDossier.rollNo || regRec?.rollNo
+                    );
+
+                    const currentSem = resolveCorrectSemester(top, effDossier, regRec);
+
                     let dossierText = `🔓 *CONFIDENTIAL DOSSIER UNLOCKED*\n` +
                                       `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                                       `👤 *Name:* ${targetName}\n` +
-                                      `📋 *Reg. No:* \`${targetRoll}\`\n` +
-                                      (dossier.rollNo ? `🆔 *Roll No:* \`${dossier.rollNo}\`\n` : '');
+                                      `📋 *Reg. No:* \`${targetRoll}\`\n`;
+
+                    if (allRolls.length > 1) {
+                        dossierText += `🔢 *Roll Nos:* ${allRolls.map(r => `\`${r}\``).join(' · ')}\n`;
+                    } else if (allRolls.length === 1) {
+                        dossierText += `🔢 *Roll No:* \`${allRolls[0]}\`\n`;
+                    }
 
                     if (top) {
+                        const isAlumni = top.status === 'Alumni / Left' || effDossier.status === 'Alumni / Left';
+                        const semDisplay = isAlumni ? 'Alumni / Ex-Student' : `Sem ${top.semester || currentSem}`;
                         dossierText += `🏛️ *Dept:* ${top.department_name || top.degree_name || 'NERIST'}\n` +
-                                       `📚 *Program:* ${top.program_name || 'Degree'} (Sem ${top.semester || 'N/A'})\n` +
+                                       `🎓 *Program:* ${top.program_name || 'Degree'} (${semDisplay})\n` +
                                        `📊 *CGPA:* ${top.cgpa || 'N/A'}\n` +
                                        (top.state ? `📍 *State:* ${top.state}\n` : '');
                     }
 
                     dossierText += `\n📋 *Personal Information:*\n`;
-                    if (dossier.phone) dossierText += `📱 *Phone:* ${dossier.phone}\n`;
-                    if (dossier.email) dossierText += `📧 *Email:* ${dossier.email}\n`;
-                    if (dossier.dob) dossierText += `🎂 *DOB:* ${dossier.dob}\n`;
-                    if (dossier.fatherName) dossierText += `👨 *Father:* ${dossier.fatherName}\n`;
-                    if (dossier.motherName) dossierText += `👩 *Mother:* ${dossier.motherName}\n`;
-                    if (dossier.parentsMobile) dossierText += `📞 *Parent Phone:* ${dossier.parentsMobile}\n`;
-                    if (dossier.address) dossierText += `🏠 *Address/Pin:* ${dossier.address}\n`;
-                    if (dossier.aadhaar) dossierText += `🪪 *Aadhaar:* \`${dossier.aadhaar}\`\n`;
+                    if (effDossier.phone) dossierText += `📱 *Phone:* ${effDossier.phone}\n`;
+                    if (effDossier.email) dossierText += `📧 *Email:* ${effDossier.email}\n`;
+                    if (effDossier.dob) dossierText += `🎂 *DOB:* ${effDossier.dob}\n`;
+                    if (effDossier.fatherName) dossierText += `👨 *Father:* ${effDossier.fatherName}\n`;
+                    if (effDossier.motherName) dossierText += `👩 *Mother:* ${effDossier.motherName}\n`;
+                    if (effDossier.parentsMobile) dossierText += `📞 *Parent Phone:* ${effDossier.parentsMobile}\n`;
+                    if (effDossier.address) dossierText += `🏠 *Address/Pin:* ${effDossier.address}\n`;
+                    if (effDossier.aadhaar) dossierText += `🪪 *Aadhaar:* \`${effDossier.aadhaar}\`\n`;
 
                     if (access.isAdmin) {
                         dossierText += `\n_👑 VIP Admin Access (Unlimited)_`;
@@ -972,15 +1248,24 @@ async function startBusinessBot() {
                         dossierText += `\n_⚡ Free Unlocks Remaining Today: ${Math.max(0, access.remaining - 1)}/3_`;
                     }
 
-                    try {
-                        await sock.sendMessage(senderJid, {
-                            image: { url: photoUrl },
-                            caption: dossierText.trim()
-                        });
-                    } catch (e) {
-                        await sendMsg(sock, senderJid, dossierText.trim());
+                    const destJid = (senderJid && !senderJid.endsWith('@lid'))
+                        ? senderJid
+                        : (userPhone ? `${userPhone}@s.whatsapp.net` : resolveToPnJid(senderJid));
+
+                    const photoBuf = await fetchStudentPhotoBuffer(targetRoll);
+                    if (photoBuf) {
+                        try {
+                            await sock.sendMessage(destJid, {
+                                image: photoBuf,
+                                caption: dossierText.trim()
+                            });
+                        } catch (e) {
+                            await sendMsg(sock, destJid, dossierText.trim());
+                        }
+                    } else {
+                        await sendMsg(sock, destJid, dossierText.trim());
                     }
-                    log(`Dossier unlocked with photo for ${targetRoll}`);
+                    log(`Dossier unlocked for ${targetRoll} (Photo: ${photoBuf ? 'Delivered' : 'None/Suppressed'})`);
                 } else {
                     await sendMsg(sock, senderJid, `❌ Unable to unlock dossier for \`${targetRoll}\`.`);
                 }

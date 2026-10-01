@@ -1,6 +1,13 @@
 Set WshShell = CreateObject("WScript.Shell")
-scriptDir = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
+Set fso = CreateObject("Scripting.FileSystemObject")
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+If Not fso.FileExists(scriptDir & "\start_watchdog.bat") Then
+    scriptDir = "c:\Users\Devananda Wahengbam\Desktop\whatsappbot"
+End If
+
 WshShell.CurrentDirectory = scriptDir
-batchPath = scriptDir & "\start-bot.bat"
-' 0 hides the window completely, False allows it to run asynchronously
-WshShell.Run Chr(34) & batchPath & Chr(34), 0, False
+
+q = Chr(34)
+batPath = q & scriptDir & "\start_watchdog.bat" & q
+
+WshShell.Run batPath, 0, False

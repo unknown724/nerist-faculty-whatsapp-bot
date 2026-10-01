@@ -28,6 +28,7 @@ const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 const QRCodeImage = require('qrcode');
 const fs = require('fs');
+const { initStudentIndex, getStudentByPhone, getStudentByRoll } = require('./student_index');
 const path = require('path');
 const { execSync, exec } = require('child_process');
 const { fetchDossier } = require('./dossier');
@@ -80,6 +81,7 @@ try {
     if (fs.existsSync(studentsPath)) {
         studentsList = JSON.parse(fs.readFileSync(studentsPath, 'utf8'));
         log(`Loaded ${studentsList.length} student records from students.json.`);
+        initStudentIndex(studentsList);
     }
 } catch (err) {
     console.warn('Warning: Failed to load students.json:', err.message);
@@ -166,11 +168,16 @@ function searchStudents(rawQuery) {
     const q = rawQuery.trim().toLowerCase();
     const cleanQ = cleanHonorifics(rawQuery).toLowerCase();
 
-    // 1. Match by roll number / user_id (e.g. 121/108, 121_108, 121108)
+    // 1. Direct Roll / Reg No Match
+    const byRoll = getStudentByRoll ? getStudentByRoll(rawQuery.trim()) : null;
+    if (byRoll) return [byRoll];
+
+    // 2. Match by roll number / user_id (e.g. 121/108, 121_108, 121108, D22AE002, D/22/AE/002)
     const rollQuery = q.replace(/[^a-zA-Z0-9]/g, '');
     const rollMatches = studentsList.filter(s => {
         const roll = (s.user_id || '').toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
-        return roll === rollQuery || (rollQuery.length >= 4 && roll.includes(rollQuery));
+        const classRoll = (s.roll_no || '').toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+        return roll === rollQuery || classRoll === rollQuery || (rollQuery.length >= 4 && (roll.includes(rollQuery) || classRoll.includes(rollQuery)));
     });
     if (rollMatches.length > 0) return rollMatches;
 
@@ -380,7 +387,7 @@ function cleanJid(jid) {
 async function sendSmartReply(sock, senderJid, isMessageToSelf, text, imageUrl = null) {
     if (!text && !imageUrl) return;
     const myJid = cleanJid(sock.user?.id);
-    const target = isMessageToSelf ? (myJid || (senderJid && !senderJid.endsWith('@lid') ? senderJid : null)) : senderJid;
+    const target = senderJid || myJid;
     if (!target) return;
 
     if (imageUrl) {
@@ -405,31 +412,137 @@ async function sendSmartReply(sock, senderJid, isMessageToSelf, text, imageUrl =
     return await sendMsg(sock, target, text);
 }
 
-/**
- * Formats Clean, Actionable Interactive Button Cards with one-tap copyable WhatsApp command blocks
- * Works 100% reliably across all WhatsApp versions and devices without being blocked by Meta
- */
-async function sendInteractiveButtons({ sock, jid, title = '', body = '', footer = '', buttons = [], isMessageToSelf = false, imageUrl = null }) {
-    let messageText = '';
-    if (title) messageText += `*${title}*\n\n`;
-    messageText += `${body}\n`;
+const lidMappingCache = new Map();
 
-    if (buttons && buttons.length > 0) {
-        messageText += `\n`;
-        for (const btn of buttons) {
-            if (btn.url) {
-                messageText += `🔗 *${btn.text}:*\n${btn.url}\n\n`;
-            } else {
-                const shortcut = btn.id ? btn.id.replace('btn_admin_', '#').replace('btn_', '@') : btn.text;
-                messageText += `╔═════════════════════════╗\n   ${btn.text}\n   👉 \`${shortcut}\`\n╚═════════════════════════╝\n`;
+function resolveToPnJid(jid) {
+    if (!jid) return jid;
+    if (!jid.endsWith('@lid')) return jid;
+    const lidNum = jid.split('@')[0];
+    if (lidMappingCache.has(lidNum)) {
+        return lidMappingCache.get(lidNum);
+    }
+    try {
+        const authDir = path.join(__dirname, 'session_auth');
+        const revPath = path.join(authDir, `lid-mapping-${lidNum}_reverse.json`);
+        if (fs.existsSync(revPath)) {
+            const pn = JSON.parse(fs.readFileSync(revPath, 'utf8'));
+            if (pn) {
+                const target = `${pn}@s.whatsapp.net`;
+                lidMappingCache.set(lidNum, target);
+                return target;
             }
         }
-    }
-    if (footer) {
-        messageText += `\n_${footer}_`;
+    } catch (e) {}
+    return jid;
+}
+
+/**
+ * Formats Clean, Native WhatsApp Interactive Quick Reply Pill Buttons
+ * (Same native pill buttons as student disambiguation in WhatsApp Business)
+ */
+async function sendInteractiveButtons({ sock, jid, title = '', body = '', footer = 'NERIST Server Controller', buttons = [], isMessageToSelf = false, imageUrl = null }) {
+    if (!jid || !body) return;
+    const myJid = cleanJid(sock.user?.id);
+    const myPn = myJid ? myJid.split('@')[0].split(':')[0] : null;
+    const targetJid = jid || resolveToPnJid(jid);
+
+    if (!buttons || buttons.length === 0) {
+        return await sendSmartReply(sock, targetJid, isMessageToSelf, `${title ? '*' + title + '*\n\n' : ''}${body}`, imageUrl);
     }
 
-    return await sendSmartReply(sock, jid, isMessageToSelf, messageText.trim(), imageUrl);
+    const nativeButtons = buttons.map((btn) => {
+        if (btn.url) {
+            return {
+                name: 'cta_url',
+                buttonParamsJson: JSON.stringify({
+                    display_text: btn.text,
+                    url: btn.url,
+                    merchant_url: btn.url,
+                }),
+            };
+        }
+        return {
+            name: 'quick_reply',
+            buttonParamsJson: JSON.stringify({
+                display_text: btn.text,
+                id: btn.id,
+            }),
+        };
+    });
+
+    try {
+        const waMsg = generateWAMessageFromContent(
+            targetJid,
+            {
+                viewOnceMessage: {
+                    message: {
+                        messageContextInfo: {
+                            deviceListMetadata: {},
+                            deviceListMetadataVersion: 2,
+                        },
+                        interactiveMessage: proto.Message.InteractiveMessage.fromObject({
+                            header: proto.Message.InteractiveMessage.Header.fromObject({
+                                title: title || '',
+                                hasMediaAttachment: false,
+                            }),
+                            body: proto.Message.InteractiveMessage.Body.fromObject({
+                                text: body,
+                            }),
+                            footer: proto.Message.InteractiveMessage.Footer.fromObject({
+                                text: footer || 'NERIST Server Controller',
+                            }),
+                            nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.fromObject({
+                                buttons: nativeButtons,
+                            }),
+                        }),
+                    },
+                },
+            },
+            { userJid: sock.user?.id }
+        );
+
+        const additionalNodes = [
+            {
+                tag: 'biz',
+                attrs: {},
+                content: [
+                    {
+                        tag: 'interactive',
+                        attrs: {
+                            type: 'native_flow',
+                            v: '1',
+                        },
+                        content: [
+                            {
+                                tag: 'native_flow',
+                                attrs: {
+                                    name: 'mixed',
+                                    v: '9',
+                                },
+                            },
+                        ],
+                    },
+                ],
+            },
+        ];
+
+        await sock.relayMessage(targetJid, waMsg.message, {
+            messageId: waMsg.key.id,
+            additionalNodes,
+        });
+
+        if (waMsg?.key?.id) {
+            botSentIds.add(waMsg.key.id);
+        }
+        log(`Delivered native interactive buttons to ${targetJid}`);
+        return waMsg;
+    } catch (btnErr) {
+        log(`sendInteractiveButtons error: ${btnErr.message}, sending fallback text`);
+        const fallback = `${title ? '*' + title + '*\n\n' : ''}${body}\n\n` +
+            buttons.map(b => b.url ? `🔗 ${b.text}: ${b.url}` : `👉 \`${b.id}\``).join('\n') +
+            (footer ? `\n\n_${footer}_` : '');
+        return await sendSmartReply(sock, targetJid, isMessageToSelf, fallback.trim(), imageUrl);
+    }
 }
 
 // Global runtime state
@@ -442,21 +555,54 @@ let botStartTime = Date.now();
 let greetedOnStartup = false;
 let watchdogsStarted = false;
 
-async function startBot() {
-    log('Initializing Baileys Multi-Device Client...');
-    const authDir = path.join(__dirname, 'session_auth');
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
-    const { version } = await fetchLatestBaileysVersion();
+async function waitForInternetOnBoot() {
+    log('Performing pre-flight network & captive portal check...');
+    let tries = 0;
+    while (true) {
+        tries++;
+        try {
+            const net = await checkInternetWatchdog();
+            if (net.online) {
+                log('Internet is ACTIVE! Ready to connect.');
+                return true;
+            }
+            if (tries % 5 === 0) {
+                log(`[Network Pre-Flight] Waiting for Wi-Fi / Portal login (Attempt ${tries})...`);
+            }
+        } catch (e) {
+            // non-fatal probe error
+        }
+        await new Promise(r => setTimeout(r, 3000));
+    }
+}
 
-    const sock = makeWASocket({
-        version,
-        auth: state,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        browser: Browsers.windows('Chrome'),
-        syncFullHistory: false,
-        generateHighQualityLinkPreview: false
-    });
+async function startBot() {
+    try {
+        await waitForInternetOnBoot();
+        log('Initializing Baileys Multi-Device Client...');
+        const authDir = path.join(__dirname, 'session_auth');
+        const { state, saveCreds } = await useMultiFileAuthState(authDir);
+        
+        let version = [2, 3000, 1015901307];
+        try {
+            const vData = await fetchLatestBaileysVersion();
+            if (vData && vData.version) version = vData.version;
+        } catch (vErr) {
+            log(`Could not fetch latest Baileys version online (${vErr.message}), using stable fallback version.`);
+        }
+
+        const sock = makeWASocket({
+            version,
+            auth: state,
+            logger: pino({ level: 'silent' }),
+            printQRInTerminal: false,
+            browser: Browsers.windows('Chrome'),
+            syncFullHistory: false,
+            generateHighQualityLinkPreview: false,
+            keepAliveIntervalMs: 20000,
+            defaultQueryTimeoutMs: 60000,
+            connectTimeoutMs: 60000
+        });
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -532,327 +678,46 @@ async function startBot() {
     });
 
     // Message events
+    // =====================================================================
+    // 🔒 STRICT HARD RULE FOR PERSONAL NUMBER (+91 9863013886):
+    // ONLY RESPOND WHEN @find IS INCLUDED! IGNORE EVERYTHING ELSE!
+    // Whatever message is there, whatever files, ignore all unless @find is included.
+    // =====================================================================
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (!messages || messages.length === 0) return;
 
         for (const msg of messages) {
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
-
-            // Ignore messages sent by our bot process to avoid loops
+            if (msg.key.fromMe) continue; // Ignore messages from ourselves
             if (msg.key.id && botSentIds.has(msg.key.id)) continue;
 
             const senderJid = msg.key.remoteJid;
-            const cleanSender = cleanJid(senderJid);
-            const myJid = cleanJid(sock.user?.id || state?.creds?.me?.id);
-            const myLid = cleanJid(sock.user?.lid || state?.creds?.me?.lid);
-            const myPhone = (myJid || '').split('@')[0];
-            const isFromMe = msg.key.fromMe === true;
-            const isGroup = senderJid.endsWith('@g.us');
-
-            // True if this is the "Message Yourself" chat
-            const isMessageToSelf = !isGroup && (
-                cleanSender === myJid ||
-                cleanSender === myLid ||
-                (myPhone && cleanSender.includes(myPhone)) ||
-                (isFromMe && (senderJid.endsWith('@lid') || cleanSender === myJid || cleanSender === myLid))
-            );
-
-            // Unwrap content
             const content = normalizeMessageContent(msg.message);
 
-            // 0. Detect Button Interaction (Native Flow Quick Reply / Button)
-            let buttonId = null;
-            const interactive =
-                content?.interactiveResponseMessage ||
-                msg.message?.interactiveResponseMessage ||
-                content?.viewOnceMessage?.message?.interactiveResponseMessage ||
-                msg.message?.viewOnceMessage?.message?.interactiveResponseMessage;
-
-            if (interactive?.nativeFlowResponseMessage?.paramsJson) {
-                try {
-                    const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
-                    buttonId = params.id;
-                    log(`Native flow button tapped: id="${buttonId}" by ${senderJid}`);
-                } catch (e) {}
-            }
-
-            if (!buttonId && (content?.templateButtonReplyMessage || msg.message?.templateButtonReplyMessage)) {
-                const t = content?.templateButtonReplyMessage || msg.message?.templateButtonReplyMessage;
-                buttonId = t.selectedId;
-            }
-
-            if (!buttonId && (content?.buttonsResponseMessage || msg.message?.buttonsResponseMessage)) {
-                const b = content?.buttonsResponseMessage || msg.message?.buttonsResponseMessage;
-                buttonId = b.selectedButtonId;
-            }
-
-            // Extract message text or buttonId
-            const rawBody = (
-                buttonId ||
+            // Extract plain text from message or caption
+            const text = (
                 content?.conversation ||
                 content?.extendedTextMessage?.text ||
+                content?.imageMessage?.caption ||
+                content?.documentMessage?.caption ||
+                content?.videoMessage?.caption ||
                 ''
             ).trim();
 
-            if (!rawBody) continue;
-
-            const lowerBody = rawBody.toLowerCase();
-
-            // If it's outgoing from ourselves to another person/group (not Message Yourself and not an admin command), ignore
-            if (isFromMe && !isMessageToSelf && !lowerBody.startsWith('#')) continue;
-
-            log(`[MSG] fromMe=${isFromMe} toSelf=${isMessageToSelf} jid=${senderJid} text="${rawBody}"`);
-
-            // =====================================================================
-            // 🔒 ADMIN COMMANDS & BUTTONS (ONLY IN "MESSAGE YOURSELF")
-            // =====================================================================
-            const isAdminCommand = (isMessageToSelf || (isFromMe && !isGroup)) && (
-                lowerBody.startsWith('#') ||
-                lowerBody.startsWith('btn_admin_') ||
-                ['status', 'server', 'shutdown', 'restart', 'wifilogin', 'helpadmin', 'settings', 'setting', 'menu', 'admin'].includes(lowerBody) ||
-                lowerBody.startsWith('#shutdown') ||
-                lowerBody.startsWith('shutdown') ||
-                lowerBody.startsWith('#restart') ||
-                lowerBody.startsWith('restart') ||
-                lowerBody.includes('shutdown') ||
-                lowerBody.includes('reboot') ||
-                lowerBody.includes('cancel') ||
-                lowerBody.includes('status') ||
-                lowerBody.includes('wifi')
-            );
-
-            if (isAdminCommand) {
-                // 1. Status Check
-                if (
-                    lowerBody === '#status' || lowerBody === 'status' || lowerBody === '#server' || lowerBody === 'server' ||
-                    lowerBody === 'btn_admin_status' || lowerBody.includes('status')
-                ) {
-                    const power = await getPowerStatus();
-                    const mem = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
-                    const powerIcon = power.isAcOnline ? '⚡' : '⚠️';
-                    const powerState = power.isAcOnline ? 'Plugged In (AC Power ON)' : 'Discharging (Electricity is OFF!)';
-                    const uptime = formatUptime((Date.now() - botStartTime) / 1000);
-
-                    await sendInteractiveButtons({
-                        sock,
-                        jid: senderJid,
-                        isMessageToSelf,
-                        title: '🖥️ NERIST Server Diagnostics',
-                        body:
-`• ${powerIcon} *Power:* ${powerState}
-• 🔋 *Battery:* ${power.batteryPct}% ${power.isAcOnline ? '(Charging)' : '(On Battery)'}
-• 📶 *Campus Wi-Fi User:* ${CAMPUS_WIFI_USER}
-• 🧠 *Node RAM:* ${mem} MB
-• ⏱️ *Server Uptime:* ${uptime}
-• 📊 *Searches Today:* ${searchCount} queries handled`,
-                        footer: 'NERIST Server Controller',
-                        buttons: [
-                            { id: 'btn_admin_status', text: '📊 Refresh Status' },
-                            { id: 'btn_admin_wifi_login', text: '📶 Re-login Wi-Fi' },
-                            { id: 'btn_admin_shutdown_req', text: '🛑 Shutdown Laptop' }
-                        ]
-                    });
-                    return;
-                }
-
-                // 2. Request Shutdown (Interactive Quick Actions)
-                if (
-                    lowerBody === '#shutdown' || lowerBody === 'shutdown' || lowerBody === 'btn_admin_shutdown_req' ||
-                    lowerBody.includes('shutdown laptop')
-                ) {
-                    pendingShutdownTime = Date.now();
-                    await sendInteractiveButtons({
-                        sock,
-                        jid: senderJid,
-                        isMessageToSelf,
-                        title: '⚠️ Confirm Server Shutdown?',
-                        body: 'This will completely turn off the laptop server.\n\nAre you sure you want to proceed? (Expires in 60s)',
-                        footer: 'Emergency Protection',
-                        buttons: [
-                            { id: '#shutdown confirm', text: '🛑 Yes, Shut Down' },
-                            { id: '#cancelshutdown', text: '❌ No, Cancel' }
-                        ]
-                    });
-                    return;
-                }
-
-                // 3. Confirm Shutdown
-                if (
-                    lowerBody === '#shutdown confirm' || lowerBody === 'shutdown confirm' || lowerBody === 'btn_admin_shutdown_confirm' ||
-                    lowerBody.includes('yes, shut down') || lowerBody === 'yes'
-                ) {
-                    if (Date.now() - pendingShutdownTime <= 60000) {
-                        await sendSmartReply(sock, senderJid, isMessageToSelf, '🛑 Shutting down the laptop in 10 seconds. Goodbye!');
-                        log('Remote shutdown initiated by owner.');
-                        executeShutdown(10, 'Remote shutdown requested via WhatsApp');
-                    } else {
-                        await sendSmartReply(sock, senderJid, isMessageToSelf, '⏳ Confirmation expired. Send `#shutdown` again.');
-                    }
-                    pendingShutdownTime = 0;
-                    return;
-                }
-
-                // 4. Cancel Shutdown / Cancel Action
-                if (
-                    lowerBody === '#cancelshutdown' || lowerBody === 'cancel' || lowerBody === 'no' || lowerBody === 'btn_admin_shutdown_cancel' ||
-                    lowerBody.includes('no, cancel') || lowerBody.includes('cancel')
-                ) {
-                    executeCancelShutdown();
-                    emergencyShutdownTriggered = false;
-                    pendingShutdownTime = 0;
-                    pendingRestartTime = 0;
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, '✅ Action cancelled. Server remains online.');
-                    log('Scheduled action cancelled by owner.');
-                    return;
-                }
-
-                // 5. Request Restart (Interactive Quick Actions)
-                if (
-                    lowerBody === '#restart' || lowerBody === 'restart' || lowerBody === 'btn_admin_restart_req' ||
-                    lowerBody.includes('reboot laptop')
-                ) {
-                    pendingRestartTime = Date.now();
-                    await sendInteractiveButtons({
-                        sock,
-                        jid: senderJid,
-                        isMessageToSelf,
-                        title: '🔄 Confirm Server Restart?',
-                        body: 'This will reboot the laptop operating system.\n\nAre you sure you want to proceed? (Expires in 60s)',
-                        footer: 'System Control',
-                        buttons: [
-                            { id: '#restart confirm', text: '🔄 Yes, Reboot' },
-                            { id: '#cancelshutdown', text: '❌ No, Cancel' }
-                        ]
-                    });
-                    return;
-                }
-
-                // 6. Confirm Restart
-                if (
-                    lowerBody === '#restart confirm' || lowerBody === 'restart confirm' || lowerBody === 'btn_admin_restart_confirm' ||
-                    lowerBody.includes('yes, reboot')
-                ) {
-                    if (Date.now() - pendingRestartTime <= 60000) {
-                        await sendSmartReply(sock, senderJid, isMessageToSelf, '🔄 Restarting the laptop in 10 seconds...');
-                        log('Remote restart initiated by owner.');
-                        executeRestart(10, 'Remote restart requested via WhatsApp');
-                    } else {
-                        await sendSmartReply(sock, senderJid, isMessageToSelf, '⏳ Confirmation expired. Send `#restart` again.');
-                    }
-                    pendingRestartTime = 0;
-                    return;
-                }
-
-                // 7. Re-login Campus Wi-Fi
-                if (
-                    lowerBody === '#wifilogin' || lowerBody === 'wifilogin' || lowerBody === 'wifi' || lowerBody === 'btn_admin_wifi_login' ||
-                    lowerBody.includes('re-login wi-fi') || lowerBody.includes('re-login campus wi-fi')
-                ) {
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, '🔄 Attempting authentication with NERIST captive portal (10.10.200.1:8090)...');
-                    const result = await loginCampusPortal();
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, result.success ? `✅ ${result.message}` : `❌ ${result.message}`);
-                    return;
-                }
-
-                // 8. Restart Bot Process
-                if (lowerBody === '#restartbot' || lowerBody === 'restartbot' || lowerBody === 'btn_admin_restart_bot') {
-                    await sendSmartReply(sock, senderJid, isMessageToSelf, '♻️ Restarting WhatsApp bot process...');
-                    log('Restarting bot process on owner request...');
-                    setTimeout(() => process.exit(0), 1000);
-                    return;
-                }
-
-                // 9. Admin Settings & Control Menu
-                if (
-                    lowerBody === '#settings' || lowerBody === 'settings' || lowerBody === '#setting' || lowerBody === 'setting' ||
-                    lowerBody === '#menu' || lowerBody === 'menu' || lowerBody === '#admin' || lowerBody === 'admin' ||
-                    lowerBody === '#helpadmin' || lowerBody === 'helpadmin' || lowerBody === '#help'
-                ) {
-                    await sendInteractiveButtons({
-                        sock,
-                        jid: senderJid,
-                        isMessageToSelf,
-                        title: '⚙️ NERIST Server Control Panel',
-                        body:
-`*Hostel 24/7 Server Administration*
-Choose an option below:`,
-                        footer: 'NERIST Remote Admin',
-                        buttons: [
-                            { id: '#status', text: '📊 Check Server Status' },
-                            { id: '#wifilogin', text: '📶 Re-login Wi-Fi' },
-                            { id: '#shutdown', text: '🛑 Shutdown Laptop' },
-                            { id: '#restart', text: '🔄 Reboot Laptop' }
-                        ]
-                    });
-                    return;
-                }
+            // HARD RULE: ONLY when @find is included! Ignore ALL others!
+            if (!text || !text.toLowerCase().includes('@find')) {
+                continue;
             }
 
-            // =====================================================================
-            // 👥 PUBLIC SEARCH FOR STUDENTS & FACULTY (@find, @student, @help)
-            // =====================================================================
+            log(`[@find Triggered] jid=${senderJid} text="${text}"`);
 
-            // 1. Help or Menu button
-            if (lowerBody === '@help' || lowerBody === '!help' || lowerBody === 'hi' || lowerBody === 'hello' || lowerBody === 'menu' || lowerBody === 'btn_help_find') {
-                await sendInteractiveButtons({
-                    sock,
-                    jid: senderJid,
-                    isMessageToSelf,
-                    title: 'NERIST Faculty Directory 👨‍🏫',
-                    body:
-`Welcome to the NERIST Faculty Directory Assistant!
+            const findMatch = text.match(/@find\s*(.*)/i);
+            const query = (findMatch ? findMatch[1] : '').trim();
 
-👨‍🏫 *Faculty Search:*
-Send \`@find <name or shortcut>\`
-• \`@find akr\` (Ashok Kumar Ray)
-• \`@find jb\` (Dr. Joyatri Bora Hazarika)
-• \`@find Rajesh Kumar\` (By name)
-
-🎓 *Student Directory:*
-Please contact the Student Bot at: *+919362980761*`,
-                    footer: 'nerist-faculty-search.pages.dev',
-                    buttons: [
-                        { id: '@find akr', text: '🔍 Faculty Example (akr)' },
-                        { url: 'https://nerist-faculty-search.pages.dev/', text: '🌐 Faculty Explorer Web' }
-                    ]
-                });
-                return;
+            if (!query) {
+                await sendSmartReply(sock, senderJid, false, 'Please specify a faculty name or shortcut.\n*Example:* `@find Rajesh Kumar` or `@find akr`');
+                continue;
             }
-
-            // Search Again button clicked
-            if (lowerBody === 'btn_search_again' || lowerBody === '@search' || lowerBody === 'search') {
-                await sendSmartReply(sock, senderJid, isMessageToSelf, '• Search Faculty: `@find <name>` (e.g. `@find akr`)\n• For Student Search, message: *+919362980761*');
-                return;
-            }
-
-            // Silently ignore any @student or @dossier attempts on personal number (9863013886)
-            if (lowerBody.startsWith('@student') || lowerBody.startsWith('!student') || lowerBody.startsWith('student ') || lowerBody.startsWith('@dossier') || lowerBody.startsWith('!dossier') || lowerBody.startsWith('dossier ')) {
-                return;
-            }
-
-            // ---------------------------------------------------------------------
-            // 👨‍🏫 FACULTY SEARCH (@find <name or shortcut>)
-            // ---------------------------------------------------------------------
-            let query = '';
-            if (lowerBody.startsWith('@find')) {
-                query = rawBody.slice(5).trim();
-            } else if (lowerBody.startsWith('!find')) {
-                query = rawBody.slice(5).trim();
-            } else if (lowerBody.startsWith('find ')) {
-                query = rawBody.slice(5).trim();
-            } else if (!isGroup) {
-                // In private chat or Message Yourself, auto-match if valid faculty query
-                const quickCheck = searchFaculty(rawBody);
-                if (quickCheck.length > 0) {
-                    query = rawBody.trim();
-                }
-            }
-
-            if ((lowerBody === '@find' || lowerBody === '!find' || lowerBody === 'find') && !query) {
-                await sendSmartReply(sock, senderJid, isMessageToSelf, 'Please specify a faculty name or shortcut.\n*Example:* `@find Rajesh Kumar` or `@find akr`');
-                return;
-            }
-            if (!query) return;
 
             searchCount++;
             const matches = searchFaculty(query);
@@ -872,14 +737,18 @@ Please contact the Student Bot at: *+919362980761*`,
                     }).join(', ');
                 }
 
-                await sendSmartReply(sock, senderJid, isMessageToSelf, replyBody.trim());
+                await sendSmartReply(sock, senderJid, false, replyBody.trim());
                 log(`Answered @find "${query}" with ${matches.length} matches.`);
             } else {
-                await sendSmartReply(sock, senderJid, isMessageToSelf, 'No database found');
+                await sendSmartReply(sock, senderJid, false, 'No database found');
                 log(`Answered @find "${query}" with: No database found`);
             }
         }
     });
+    } catch (startErr) {
+        log(`Error during startBot startup: ${startErr.message}. Retrying in 5 seconds...`);
+        setTimeout(startBot, 5000);
+    }
 }
 
 /**

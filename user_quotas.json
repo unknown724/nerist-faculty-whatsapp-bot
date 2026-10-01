@@ -1,0 +1,16 @@
+{
+  "quotas": {},
+  "usedUtrs": {},
+  "pendingClaims": {
+    "cmujwycodeu3": {
+      "claimId": "cmujwycodeu3",
+      "userPhone": "9863013886",
+      "senderJid": "60769525878871@lid",
+      "targetRoll": "121/108",
+      "amount": 3,
+      "type": "single",
+      "utr": "916009368371",
+      "timestamp": 1790519287982
+    }
+  }
+}

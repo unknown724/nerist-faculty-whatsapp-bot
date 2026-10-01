@@ -1,6 +1,4 @@
 @echo off
+title PrintKurox & NERIST 24/7 Server
 cd /d "%~dp0"
-echo [%date% %time%] Starting NERIST WhatsApp Bots (Personal & Business)... >> "%~dp0bot.log"
-start /B node bot.js >> "%~dp0bot.log" 2>&1
-start /B node bot_business.js >> "%~dp0bot_business.log" 2>&1
-
+call start_24_7_server.bat

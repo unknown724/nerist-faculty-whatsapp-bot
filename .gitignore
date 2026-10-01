@@ -2,8 +2,15 @@ node_modules/
 .wwebjs_auth/
 .wwebjs_cache/
 session_auth/
+session_auth_business/
 npm-debug.log*
-bot.log
+*.log
 .env
+.env*
 qr.png
+qr_business.png
 .DS_Store
+*.exe
+daemon/*.exe
+*.pid
+scratch/
