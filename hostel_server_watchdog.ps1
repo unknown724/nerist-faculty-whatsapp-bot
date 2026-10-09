@@ -150,13 +150,25 @@ function Ensure-Service-1-PersonalBot {
 }
 
 function Ensure-Service-2-PrintKuroxBot {
+    # Auto-sync latest whatsapp_bot.js from git repository if updated
+    $repoWaBot = "c:\Users\Devananda Wahengbam\Desktop\whatsappbot\scratch\printkurox\daemon\whatsapp_bot\whatsapp_bot.js"
+    $liveWaBot = Join-Path $bot2Dir "whatsapp_bot.js"
+    if ((Test-Path $repoWaBot) -and (Test-Path $liveWaBot)) {
+        try {
+            if ((Get-Item $repoWaBot).LastWriteTime -gt (Get-Item $liveWaBot).LastWriteTime) {
+                Copy-Item -Path $repoWaBot -Destination $liveWaBot -Force
+                Log-Message "[Supervisor] Synced updated whatsapp_bot.js from Git repository to production daemon directory." "Green"
+            }
+        } catch {}
+    }
+
     $procs = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*whatsapp_bot.js*" })
     if ($procs.Count -gt 1) {
         Log-Message "[Supervisor] Multiple PrintKurox Bot instances detected ($($procs.Count)). Keeping newest..." "Yellow"
         $procs | Select-Object -Skip 1 | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     } elseif ($procs.Count -eq 0) {
         Log-Message "[Supervisor] Starting PrintKurox Student Bot (+91 9362980761)..." "Yellow"
-        Start-Process -FilePath $nodeExe -ArgumentList "whatsapp_bot.js" -WorkingDirectory $bot2Dir -WindowStyle Minimized
+        Start-Process -FilePath $nodeExe -ArgumentList "whatsapp_bot.js" -WorkingDirectory $bot2Dir -WindowStyle Minimized -RedirectStandardOutput (Join-Path $bot2Dir "whatsapp_bot.log") -RedirectStandardError (Join-Path $bot2Dir "whatsapp_bot_err.log")
         Start-Sleep -Seconds 2
     }
 }

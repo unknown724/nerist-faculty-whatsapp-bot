@@ -63,6 +63,39 @@ function saveQuotas(data) {
     }
 }
 
+// IST Timezone Helpers for Daily Quota Reset
+function getTodayIstDate() {
+    const now = new Date();
+    const istMs = now.getTime() + (5.5 * 60 * 60 * 1000);
+    return new Date(istMs).toISOString().slice(0, 10);
+}
+
+function getDailyQuotaResetInfo() {
+    const now = new Date();
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    const nowIst = new Date(now.getTime() + istOffsetMs);
+
+    const nextResetIst = new Date(nowIst);
+    nextResetIst.setUTCDate(nextResetIst.getUTCDate() + 1);
+    nextResetIst.setUTCHours(0, 0, 0, 0);
+
+    const resetTimestamp = nextResetIst.getTime() - istOffsetMs;
+    const diffMs = Math.max(0, resetTimestamp - now.getTime());
+    const hours = Math.floor(diffMs / (1000 * 60 * 60));
+    const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+
+    const countdownStr = hours > 0
+        ? `${hours} hr${hours > 1 ? 's' : ''} ${mins} min${mins !== 1 ? 's' : ''}`
+        : `${mins} min${mins !== 1 ? 's' : ''}`;
+
+    return {
+        hours,
+        mins,
+        resetTimeStr: '12:00 AM midnight tonight',
+        countdownStr
+    };
+}
+
 function checkUserAccess(phone) {
     if (!phone) return { allowed: false, reason: 'unknown_user' };
     const cleanPhone = phone.replace(/[^0-9]/g, '').slice(-10);
@@ -1127,15 +1160,17 @@ async function startBusinessBot() {
                 const access = checkUserAccess(userPhone);
                 if (!access.allowed) {
                     const cleanRollToken = targetRoll.replace(/[^a-zA-Z0-9]/g, '_');
+                    const resetInfo = getDailyQuotaResetInfo();
                     const limitBody =
                         `⚠️ *Fair Usage Limit Reached (3/3 Used)*\n` +
                         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                        `Under the *NERIST Student Directory Policy*, accounts receive 3 complimentary dossier unlocks per 24 hours to prevent automated scraping and ensure fair server access.\n\n` +
-                        `To support dedicated 24/7 campus server hosting & computational infrastructure, additional decrypt tokens are allocated below:\n\n` +
+                        `Under the *NERIST Student Directory Policy*, accounts receive 3 complimentary dossier unlocks per day.\n` +
+                        `⏳ Your 3 free credits will renew at *12:00 AM midnight tonight* (in ${resetInfo.countdownStr}).\n\n` +
+                        `To unlock additional confidential records immediately without waiting:\n\n` +
                         `🔹 *Single Unlock Token:* *₹3*\n` +
                         `_(Decrypt 1 additional confidential profile)_\n\n` +
                         `🔹 *Campus Pass (30 Days Unlimited):* *₹119*\n` +
-                        `_(Continuous unrestricted directory access)_\n` +
+                        `_(Continuous unrestricted directory access for 30 days)_\n` +
                         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                         `_Select an option below to initiate instant token activation:_`;
 
