@@ -450,99 +450,23 @@ async function sendInteractiveButtons({ sock, jid, title = '', body = '', footer
         return await sendSmartReply(sock, targetJid, isMessageToSelf, `${title ? '*' + title + '*\n\n' : ''}${body}`, imageUrl);
     }
 
-    const nativeButtons = buttons.map((btn) => {
-        if (btn.url) {
-            return {
-                name: 'cta_url',
-                buttonParamsJson: JSON.stringify({
-                    display_text: btn.text,
-                    url: btn.url,
-                    merchant_url: btn.url,
-                }),
-            };
-        }
-        return {
-            name: 'quick_reply',
-            buttonParamsJson: JSON.stringify({
-                display_text: btn.text,
-                id: btn.id,
-            }),
-        };
-    });
+    const cleanTitle = title ? title.replace(/^\*+|\*+$/g, '').trim() : '';
+    const header = cleanTitle ? `*${cleanTitle}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n` : '';
 
-    try {
-        const waMsg = generateWAMessageFromContent(
-            targetJid,
-            {
-                viewOnceMessage: {
-                    message: {
-                        messageContextInfo: {
-                            deviceListMetadata: {},
-                            deviceListMetadataVersion: 2,
-                        },
-                        interactiveMessage: proto.Message.InteractiveMessage.fromObject({
-                            header: proto.Message.InteractiveMessage.Header.fromObject({
-                                title: title || '',
-                                hasMediaAttachment: false,
-                            }),
-                            body: proto.Message.InteractiveMessage.Body.fromObject({
-                                text: body,
-                            }),
-                            footer: proto.Message.InteractiveMessage.Footer.fromObject({
-                                text: footer || 'NERIST Server Controller',
-                            }),
-                            nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.fromObject({
-                                buttons: nativeButtons,
-                            }),
-                        }),
-                    },
-                },
-            },
-            { userJid: sock.user?.id }
-        );
-
-        const additionalNodes = [
-            {
-                tag: 'biz',
-                attrs: {},
-                content: [
-                    {
-                        tag: 'interactive',
-                        attrs: {
-                            type: 'native_flow',
-                            v: '1',
-                        },
-                        content: [
-                            {
-                                tag: 'native_flow',
-                                attrs: {
-                                    name: 'mixed',
-                                    v: '9',
-                                },
-                            },
-                        ],
-                    },
-                ],
-            },
-        ];
-
-        await sock.relayMessage(targetJid, waMsg.message, {
-            messageId: waMsg.key.id,
-            additionalNodes,
-        });
-
-        if (waMsg?.key?.id) {
-            botSentIds.add(waMsg.key.id);
-        }
-        log(`Delivered native interactive buttons to ${targetJid}`);
-        return waMsg;
-    } catch (btnErr) {
-        log(`sendInteractiveButtons error: ${btnErr.message}, sending fallback text`);
-        const fallback = `${title ? '*' + title + '*\n\n' : ''}${body}\n\n` +
-            buttons.map(b => b.url ? `🔗 ${b.text}: ${b.url}` : `👉 \`${b.id}\``).join('\n') +
-            (footer ? `\n\n_${footer}_` : '');
-        return await sendSmartReply(sock, targetJid, isMessageToSelf, fallback.trim(), imageUrl);
+    let optionsText = '';
+    if (buttons && buttons.length > 0) {
+        optionsText = buttons.map((b, idx) => {
+            if (b.url) {
+                return `• 🔗 *${b.text}:*\n  ${b.url}`;
+            }
+            return `• Reply *${b.id || idx + 1}* ➔ ${b.text}`;
+        }).join('\n\n');
     }
+
+    const footerText = footer ? `\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n_${footer}_` : '';
+    const fullText = `${header}${body}${optionsText ? '\n\n' + optionsText : ''}${footerText}`.trim();
+
+    return await sendSmartReply(sock, targetJid, isMessageToSelf, fullText, imageUrl);
 }
 
 // Global runtime state
