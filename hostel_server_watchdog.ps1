@@ -113,6 +113,9 @@ function Ensure-Network-And-Portal {
             if ($loginRes -match "LIVE" -or $loginRes -match "signed in") {
                 Log-Message "[Supervisor] NERIST Captive Portal: Auto-authenticated successfully as $portalUser!" "Green"
                 $internetOk = $true
+                Log-Message "[Supervisor] Gateway NAT table reset. Recycling WhatsApp bots to establish fresh sockets..." "Yellow"
+                Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*whatsapp_bot.js*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '(?<![a-zA-Z0-9_])bot\.js' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
             }
         } catch {}
     }
@@ -158,6 +161,22 @@ function Ensure-Service-2-PrintKuroxBot {
             if ((Get-Item $repoWaBot).LastWriteTime -gt (Get-Item $liveWaBot).LastWriteTime) {
                 Copy-Item -Path $repoWaBot -Destination $liveWaBot -Force
                 Log-Message "[Supervisor] Synced updated whatsapp_bot.js from Git repository to production daemon directory." "Green"
+            }
+        } catch {}
+    }
+
+    # Check Heartbeat liveness (detect hung/zombie node processes)
+    $heartbeatFile = Join-Path $bot2Dir "bot_heartbeat.json"
+    if (Test-Path $heartbeatFile) {
+        try {
+            $hb = Get-Content $heartbeatFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($hb -and $hb.timestamp) {
+                $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                $diffSec = [math]::Floor(($nowMs - $hb.timestamp) / 1000)
+                if ($diffSec -gt 90) {
+                    Log-Message "[Supervisor] PrintKurox Bot heartbeat is stale (${diffSec}s old). Process is hung or socket is zombie. Restarting..." "Red"
+                    Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*whatsapp_bot.js*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                }
             }
         } catch {}
     }
